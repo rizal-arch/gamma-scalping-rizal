@@ -224,6 +224,24 @@ def whale_radar_scanner(tickers):
     if not radar_data: return pd.DataFrame()
     return pd.DataFrame(radar_data).sort_values(by=["_score", "Z-Score"], ascending=False).drop(columns=["_score"])
 
+            status = "Normal"; score = 0
+            
+            # 1. DETEKSI VOLUME (WHALE ASLI)
+            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION (Tembok)"; score = 3
+            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP (Akumulasi)"; score = 3
+            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION (Guyur)"; score = 3
+            
+            # 2. DETEKSI VOLATILITAS HARGA (Tambahan untuk kasus BULL)
+            # Jika harga gerak > 3% hari ini TAPI volume biasa aja -> Ritel/Bandar Kecil beraksi
+            elif body_pct > 0.03: 
+                status = "🌪️ VOLATILE (Gerak Liar)"; score = 2
+            
+            # 3. DETEKSI VOLUME RINGAN
+            elif vol_z > 1.2: status = "👀 High Vol"; score = 1
+            
+            if score > 0:
+
+
 # ==========================================
 # 4. MESIN 3: SIGNAL GENERATOR
 # ==========================================
