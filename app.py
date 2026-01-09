@@ -8,13 +8,16 @@ from typing import List
 from enum import Enum
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime  # <-- INI YANG TADI KURANG
+from datetime import datetime
 import warnings
+from fpdf import FPDF
+import tempfile
+import os
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN (BRANDING DON)
+# 1. KONFIGURASI HALAMAN & CSS
 # ==========================================
 st.set_page_config(
     page_title="Don's Quantitative Terminal",
@@ -34,17 +37,33 @@ st.markdown("""
         border-radius: 5px;
         color: white;
     }
-    h1, h2, h3 {color: #FAFAFA;}
+    /* Mempercantik Tab */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #1e2127;
+        border-radius: 4px 4px 0px 0px;
+        gap: 1px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #4e4f52;
+        color: white;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. LOGIC MESIN
+# 2. LOGIC MESIN ANALISIS
 # ==========================================
 
 class PositionType(Enum):
-    LONG = "LONG"    # Retail Trader (Beli Opsi)
-    SHORT = "SHORT"  # Market Maker (Jual Opsi)
+    LONG = "LONG"    # Retail Trader
+    SHORT = "SHORT"  # Market Maker
 
 @dataclass
 class MarketMakerConfig:
@@ -88,31 +107,27 @@ def bsm_vectorized(S, K, T, r, sigma, position_sign=1):
     n_d1 = norm.pdf(d1)
     discount = np.exp(-r * T)
     
-    # Raw Prices (Harga Pasar)
     call_price = S * N_d1 - K * discount * N_d2
     put_price = K * discount * N_neg_d2 - S * N_neg_d1
     straddle_price = call_price + put_price
     
-    # Greeks
     call_delta = N_d1
     put_delta = N_d1 - 1
     straddle_delta = call_delta + put_delta
     gamma = n_d1 / (S * sigma * sqrt_T)
     
-    # Theta Calculations
     theta_term1 = -(S * n_d1 * sigma) / (2 * sqrt_T)
     theta_call = (theta_term1 - r * K * discount * N_d2) / 365
     theta_put = (theta_term1 + r * K * discount * N_neg_d2) / 365
     straddle_theta = theta_call + theta_put
     
-    # Output DataFrame dengan penyesuaian Posisi (Long/Short)
     return pd.DataFrame({
         'price': S,
-        'straddle_price_raw': straddle_price, # Harga pasar murni
-        'pos_value': straddle_price * position_sign, # Nilai bagi kita (Short = Liabilitas)
-        'pos_delta': straddle_delta * position_sign, # Delta bagi kita
-        'pos_gamma': 2 * gamma, # Gamma Magnitude
-        'pos_theta': straddle_theta * position_sign * -1, # Short: Theta positif (Income)
+        'straddle_price_raw': straddle_price,
+        'pos_value': straddle_price * position_sign,
+        'pos_delta': straddle_delta * position_sign,
+        'pos_gamma': 2 * gamma,
+        'pos_theta': straddle_theta * position_sign * -1,
     })
 
 # --- DATA HANDLER ---
@@ -122,9 +137,7 @@ class DataIngestion:
     
     @st.cache_data(ttl=3600, show_spinner=False)
     def fetch_data(_self, ticker, period, interval):
-        # Menggunakan yfinance untuk tarik data
         data = yf.download(ticker, period=period, interval=interval, progress=False)
-        # Fix untuk yfinance versi baru yang kadang return MultiIndex
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         return data
@@ -134,14 +147,10 @@ class DataIngestion:
         df['price'] = df['Close']
         df['log_return'] = np.log(df['price'] / df['price'].shift(1))
         
-        # Hitung Realized Volatility
         ann_factor = self.config.vol_annualization_factor
         df['realized_vol'] = df['log_return'].rolling(window=self.config.realized_vol_window).std() * np.sqrt(ann_factor)
-        
-        # Isi data kosong dengan forward fill atau nilai default
         df['realized_vol'] = df['realized_vol'].fillna(method='bfill').fillna(0.30).clip(0.05, 2.0)
         
-        # Hitung Implied Vol (Market Maker Edge)
         df['implied_vol'] = df['realized_vol'] + self.config.implied_vol_premium
         df['bar_index'] = range(len(df))
         return df
@@ -162,15 +171,12 @@ class MarketMakerBacktest:
         self.trades = []
         
     def run(self):
-        # 1. Inisialisasi
         first_price = self.data['price'].iloc[0]
         strike = round(first_price)
         bars_per_day = 78
         
-        # Hitung Time to Expiry (T)
         self.data['T'] = (self.config.time_to_expiry_days/365 - self.data['bar_index']/(bars_per_day*252)).clip(1e-6)
         
-        # 2. Hitung Greeks (BSM)
         bsm_res = bsm_vectorized(
             self.data['price'], strike, self.data['T'], 
             self.config.risk_free_rate, 
@@ -178,31 +184,26 @@ class MarketMakerBacktest:
             self.config.position_sign
         )
         
-        # Scaling dengan jumlah lot
         mult = self.config.num_straddles * self.config.contract_multiplier
         self.data['pos_delta'] = bsm_res['pos_delta'] * mult
-        self.data['pos_gamma'] = bsm_res['pos_gamma'] * mult # Risk exposure
-        self.data['pos_theta'] = bsm_res['pos_theta'] * mult # Income potential
+        self.data['pos_gamma'] = bsm_res['pos_gamma'] * mult
+        self.data['pos_theta'] = bsm_res['pos_theta'] * mult
         self.data['liability'] = bsm_res['straddle_price_raw'] * mult
         
-        # Hitung Premium Awal (Uang yang diterima/dibayar di awal)
         initial_iv = self.data['implied_vol'].iloc[0]
         initial_bsm = bsm_vectorized(pd.Series([first_price]), strike, pd.Series([self.config.time_to_expiry_days/365]), 0.05, pd.Series([initial_iv]))
         premium_total = initial_bsm['straddle_price_raw'].iloc[0] * mult
         
-        # 3. Simulasi Hedging
         stock_pos = 0
         cash_flow_stock = 0.0
         cum_tc = 0.0
         stock_hist, pnl_hist = [], []
         
-        # Threshold dalam lembar saham
         threshold = self.config.delta_threshold * mult
         
         for idx, row in self.data.iterrows():
             net_delta = row['pos_delta'] + stock_pos
             
-            # Logic Hedging: Jika Net Delta > Batas, lawan arah.
             if abs(net_delta) > threshold:
                 shares = -int(round(net_delta))
                 
@@ -211,7 +212,6 @@ class MarketMakerBacktest:
                     cost = abs(shares) * price * (self.config.total_tc_bps/10000)
                     
                     stock_pos += shares
-                    # Cash Flow: Beli = Keluar Uang (-), Jual = Masuk Uang (+)
                     cash_flow_stock -= (shares * price) 
                     cum_tc += cost
                     
@@ -219,16 +219,13 @@ class MarketMakerBacktest:
             
             stock_hist.append(stock_pos)
             
-            # 4. Perhitungan P&L Total
             current_stock_val = stock_pos * row['price']
-            hedge_pnl = cash_flow_stock + current_stock_val # Realized + Unrealized Stock P&L
+            hedge_pnl = cash_flow_stock + current_stock_val
             
             if self.config.position_type == PositionType.LONG:
-                 # Retail: (Nilai Opsi Sekarang - Biaya Beli Awal) + Profit Saham - Biaya Transaksi
                  opt_pnl = row['liability'] - premium_total
                  total_pnl = opt_pnl + hedge_pnl - cum_tc
             else:
-                 # Market Maker: (Uang Diterima Awal - Kewajiban Bayar Sekarang) + Profit Saham - Biaya Transaksi
                  opt_pnl = premium_total - row['liability']
                  total_pnl = opt_pnl + hedge_pnl - cum_tc
 
@@ -237,40 +234,107 @@ class MarketMakerBacktest:
         self.data['stock_pos'] = stock_hist
         self.data['total_pnl'] = pnl_hist
         self.data['cum_tc'] = cum_tc
-        # Kolom Opt PnL untuk visualisasi
         self.data['opt_pnl'] = [premium_total - l if self.config.position_type == PositionType.SHORT else l - premium_total for l in self.data['liability']]
         
         return self.data, self.trades, premium_total
 
 # ==========================================
-# 3. UI STREAMLIT (TAMPILAN KONSULTAN) - REVISI MATA UANG
+# 3. PDF REPORT GENERATOR
+# ==========================================
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, "Don's Quantitative Terminal | Analysis Report", 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def create_pdf(ticker, strategy_name, final_metrics, trades_df, figures):
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Judul
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, f"Ticker: {ticker} | Strategi: {strategy_name}", 0, 1)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 10, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0, 1)
+    pdf.ln(5)
+    
+    # Metrics Table
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(0, 10, "Executive Summary:", 0, 1, 'L', fill=True)
+    
+    pdf.cell(95, 10, f"Total Net P&L: {final_metrics['pnl_str']}", 1)
+    pdf.cell(95, 10, f"Option Income: {final_metrics['opt_str']}", 1, 1)
+    pdf.cell(95, 10, f"Scalping P&L:  {final_metrics['hed_str']}", 1)
+    pdf.cell(95, 10, f"Total Trades:  {final_metrics['trades_count']}", 1, 1)
+    pdf.ln(10)
+    
+    # Charts
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Visualisasi Kinerja & Risiko", 0, 1)
+    
+    for i, fig in enumerate(figures):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+            fig.savefig(tmpfile.name, bbox_inches='tight', dpi=100)
+            pdf.image(tmpfile.name, x=10, w=190)
+            pdf.ln(5)
+            
+    # Trade Log
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Log Transaksi (20 Terakhir)", 0, 1)
+    pdf.set_font("Arial", "", 8)
+    
+    pdf.cell(40, 8, "Timestamp", 1)
+    pdf.cell(20, 8, "Action", 1)
+    pdf.cell(30, 8, "Price", 1)
+    pdf.cell(30, 8, "Shares", 1)
+    pdf.cell(30, 8, "Cost", 1, 1)
+    
+    if not trades_df.empty:
+        for idx, row in trades_df.tail(20).iterrows():
+            pdf.cell(40, 8, str(row['timestamp']), 1)
+            pdf.cell(20, 8, row['action'], 1)
+            pdf.cell(30, 8, str(row['price']), 1)
+            pdf.cell(30, 8, str(row['shares']), 1)
+            pdf.cell(30, 8, str(row['transaction_cost']), 1, 1)
+    else:
+        pdf.cell(0, 8, "Tidak ada transaksi hedging tereksekusi.", 1, 1)
+
+    return pdf.output(dest='S').encode('latin-1')
+
+# ==========================================
+# 4. DASHBOARD UI
 # ==========================================
 
 with st.sidebar:
-    st.header("🎛️ Parameter Simulasi")
+    st.header("🎛️ Control Panel")
     
-    # Pilih Tipe Klien
     client_mode = st.radio("Mode Klien:", ["Retail Trader (Long)", "Market Maker (Short)"])
     
     st.divider()
     
-    # --- FITUR BARU: PILIHAN MATA UANG ---
+    # Currency Switcher
     col_curr1, col_curr2 = st.columns(2)
     with col_curr1:
         currency_code = st.selectbox("Mata Uang:", ["USD", "IDR"])
     with col_curr2:
-        # Simbol otomatis berubah
         curr_sym = "$" if currency_code == "USD" else "Rp"
         st.write(f"Simbol: **{curr_sym}**")
-    # -------------------------------------
 
-    ticker = st.text_input("Ticker Saham:", "MINA.JK" if currency_code == "IDR" else "NVDA")
+    ticker_default = "NVDA" if currency_code == "USD" else "BBCA.JK"
+    ticker = st.text_input("Ticker Saham:", ticker_default)
     period = st.selectbox("Durasi Data:", ["5d", "1mo", "3mo"])
     
     st.divider()
     
-    st.caption("Pengaturan Risiko")
-    delta_thresh = st.slider("Delta Threshold (Sensitivitas)", 0.05, 0.50, 0.10, 0.05)
+    st.caption("Risk Management")
+    delta_thresh = st.slider("Delta Threshold (Risk Tolerance)", 0.05, 0.50, 0.10, 0.05)
     contracts = st.number_input("Jumlah Lot (Contracts)", 1, 100, 10)
     
     if "Market Maker" in client_mode:
@@ -279,7 +343,7 @@ with st.sidebar:
         iv_premium = 0.0
 
 if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
-    with st.spinner("Sedang memproses data pasar & simulasi Greeks..."):
+    with st.spinner("Mengunduh data pasar & kalkulasi Greeks..."):
         
         pos_type = PositionType.SHORT if "Market Maker" in client_mode else PositionType.LONG
         
@@ -297,70 +361,122 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
         
         if not raw_df.empty:
             df = loader.process(raw_df)
-            
-            # Jalankan Mesin
             engine = MarketMakerBacktest(config, df)
             res_df, trades, premium = engine.run()
             
-            # --- TAMPILAN DASHBOARD ---
-            
+            # --- DASHBOARD HEADER ---
             st.title(f"♟️ Laporan Analisis: {ticker}")
-            st.markdown(f"**Strategi:** `{pos_type.value} STRADDLE`")
+            st.markdown(f"**Strategi:** `{pos_type.value} STRADDLE` | **Status:** `{'Ready' if res_df['total_pnl'].iloc[-1] > 0 else 'Risk Warning'}`")
             
-            # Metrik Utama (Kartu) dengan FORMAT MATA UANG DINAMIS
+            # --- METRICS CARDS ---
             final = res_df.iloc[-1]
             c1, c2, c3, c4 = st.columns(4)
-            
             pnl_color = "normal" if final['total_pnl'] > 0 else "inverse"
             
-            # Menggunakan curr_sym (Rp/$) bukan hardcode '$'
             c1.metric("Total Net P&L", f"{curr_sym} {final['total_pnl']:,.2f}", delta=f"{final['total_pnl']:,.2f}", delta_color=pnl_color)
-            c2.metric("P&L Opsi (Theta)", f"{curr_sym} {final['opt_pnl']:,.2f}")
-            c3.metric("P&L Scalping", f"{curr_sym} {(final['total_pnl'] - final['opt_pnl']):,.2f}")
+            c2.metric("P&L Opsi (Income)", f"{curr_sym} {final['opt_pnl']:,.2f}")
+            c3.metric("P&L Hedging (Cost)", f"{curr_sym} {(final['total_pnl'] - final['opt_pnl']):,.2f}")
             c4.metric("Jumlah Trade", len(trades))
+            
+            # --- TABS VISUALISASI ---
+            figures_to_print = [] # Container untuk PDF
             
             tab1, tab2, tab3 = st.tabs(["📈 Kinerja Keuangan", "⚠️ Audit Risiko", "📝 Log Transaksi"])
             
             with tab1:
                 st.subheader("Kurva Ekuitas")
-                fig, ax = plt.subplots(figsize=(10, 4))
+                # Chart 1: P&L
+                fig1, ax = plt.subplots(figsize=(10, 4))
                 ax.plot(res_df.index, res_df['total_pnl'], label='Total P&L', color='#00FF00' if final['total_pnl']>0 else '#FF3333', linewidth=2)
                 ax.fill_between(res_df.index, 0, res_df['total_pnl'], alpha=0.1, color='gray')
                 ax.axhline(0, color='white', linestyle='--', linewidth=0.5)
-                
-                # Update Label Grafik juga
                 ax.set_ylabel(f"P&L ({currency_code})")
                 
+                # Dark Mode Styling
                 ax.set_facecolor('#0e1117')
-                fig.patch.set_facecolor('#0e1117')
+                fig1.patch.set_facecolor('#0e1117')
                 ax.tick_params(colors='white')
                 ax.xaxis.label.set_color('white')
                 ax.yaxis.label.set_color('white')
                 ax.spines['bottom'].set_color('white')
-                ax.spines['top'].set_color('white') 
+                ax.spines['top'].set_color('white')
                 ax.spines['right'].set_color('white')
                 ax.spines['left'].set_color('white')
                 
-                st.pyplot(fig)
+                st.pyplot(fig1)
+                figures_to_print.append(fig1) # Save for PDF
 
             with tab2:
-                col_left, col_right = st.columns(2)
-                with col_left:
-                    st.markdown("#### Eksposur Net Delta")
-                    st.line_chart(res_df['pos_delta'] + res_df['stock_pos'])
-                with col_right:
-                    st.markdown("#### Risiko Gamma")
-                    st.line_chart(res_df['pos_gamma'])
+                # Chart 2: Risk Profile (Dual Plot for PDF consistency)
+                fig2, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+                
+                # Delta
+                net_delta = res_df['pos_delta'] + res_df['stock_pos']
+                ax_a.plot(res_df.index, net_delta, color='#F39C12')
+                ax_a.set_title("Net Delta Exposure (Directional Risk)")
+                ax_a.axhline(0, color='white', linestyle='--', linewidth=0.5)
+                ax_a.set_facecolor('#0e1117')
+                
+                # Gamma
+                ax_b.plot(res_df.index, res_df['pos_gamma'], color='#9B59B6')
+                ax_b.set_title("Gamma Sensitivity (Acceleration Risk)")
+                ax_b.set_facecolor('#0e1117')
+                
+                # Styling
+                fig2.patch.set_facecolor('#0e1117')
+                for ax in [ax_a, ax_b]:
+                    ax.tick_params(colors='white')
+                    ax.title.set_color('white')
+                    ax.spines['bottom'].set_color('white')
+                    ax.spines['top'].set_color('white')
+                    ax.spines['right'].set_color('white')
+                    ax.spines['left'].set_color('white')
+                
+                st.pyplot(fig2)
+                figures_to_print.append(fig2) # Save for PDF
 
             with tab3:
                 if trades:
                     trade_df = pd.DataFrame([vars(t) for t in trades])
-                    # Format kolom tabel dengan simbol mata uang
-                    trade_df['price'] = trade_df['price'].apply(lambda x: f"{curr_sym} {x:,.2f}")
-                    trade_df['transaction_cost'] = trade_df['transaction_cost'].apply(lambda x: f"{curr_sym} {x:,.2f}")
-                    st.dataframe(trade_df, use_container_width=True)
+                    # Formatting tampilan
+                    display_df = trade_df.copy()
+                    display_df['price'] = display_df['price'].apply(lambda x: f"{curr_sym} {x:,.2f}")
+                    display_df['transaction_cost'] = display_df['transaction_cost'].apply(lambda x: f"{curr_sym} {x:,.2f}")
+                    st.dataframe(display_df, use_container_width=True)
                 else:
-                    st.write("Tidak ada aktivitas hedging.")
+                    st.write("Pasar tenang. Tidak ada hedging yang tereksekusi.")
+
+            # --- PDF DOWNLOAD SECTION ---
+            st.divider()
+            st.subheader("🖨️ Ekspor Laporan Klien")
+            
+            col_d1, col_d2 = st.columns([1, 4])
+            with col_d1:
+                if st.button("Generate PDF Report"):
+                    with st.spinner("Mencetak dokumen institusional..."):
+                        metrics_data = {
+                            "pnl_str": f"{curr_sym} {final['total_pnl']:,.2f}",
+                            "opt_str": f"{curr_sym} {final['opt_pnl']:,.2f}",
+                            "hed_str": f"{curr_sym} {(final['total_pnl'] - final['opt_pnl']):,.2f}",
+                            "trades_count": str(len(trades))
+                        }
+                        
+                        pdf_bytes = create_pdf(
+                            ticker=ticker,
+                            strategy_name=f"{pos_type.value} STRADDLE",
+                            final_metrics=metrics_data,
+                            trades_df=pd.DataFrame([vars(t) for t in trades]) if trades else pd.DataFrame(),
+                            figures=figures_to_print
+                        )
+                        
+                        st.download_button(
+                            label="📄 Download PDF Lengkap",
+                            data=pdf_bytes,
+                            file_name=f"Quant_Report_{ticker}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf"
+                        )
+            with col_d2:
+                st.info("Laporan PDF akan menyertakan ringkasan eksekutif, grafik kinerja, profil risiko, dan log transaksi lengkap.")
                     
         else:
-            st.error(f"Gagal mengambil data untuk {ticker}. Pastikan ticker benar (misal: BBCA.JK untuk Indonesia).")
+            st.error(f"Gagal mengambil data untuk {ticker}. Pastikan ticker benar (Contoh: 'BBCA.JK' untuk Indonesia, 'NVDA' untuk US).")
