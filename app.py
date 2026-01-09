@@ -411,3 +411,118 @@ if st.session_state.analyzed:
             mime="application/pdf",
             type="primary"
         )
+
+
+# ==========================================
+# 5. FITUR TAMBAHAN: WHALE RADAR (PELACAK GAJAH)
+# ==========================================
+
+def whale_radar_scanner(tickers):
+    """
+    Memindai daftar saham untuk mencari anomali Volume & Volatilitas
+    yang menandakan aktivitas Institusi (Gajah).
+    """
+    radar_data = []
+    
+    st.write("📡 Menyalakan Radar... Memindai aktivitas Bandar...")
+    progress_bar = st.progress(0)
+    
+    for i, ticker in enumerate(tickers):
+        try:
+            # Ambil data 3 bulan terakhir
+            df = yf.download(ticker, period="3mo", progress=False)
+            
+            # Handle MultiIndex columns (yfinance update fix)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            if len(df) < 20: continue
+            
+            # 1. Hitung Rata-rata Volume 20 Hari
+            df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
+            
+            # 2. Hitung RVOL (Relative Volume) hari ini
+            # Jika RVOL > 2.0 artinya Volume hari ini 2x lipat rata-rata (Ada Gajah)
+            current_vol = df['Volume'].iloc[-1]
+            avg_vol = df['Vol_SMA20'].iloc[-1]
+            rvol = current_vol / avg_vol if avg_vol > 0 else 0
+            
+            # 3. Hitung Perubahan Harga & Volatilitas
+            df['Returns'] = df['Close'].pct_change()
+            daily_ret = df['Returns'].iloc[-1] * 100
+            
+            # Z-Score: Seberapa aneh pergerakan hari ini dibanding biasanya?
+            volatility = df['Returns'].std()
+            z_score = (df['Returns'].iloc[-1]) / volatility if volatility > 0 else 0
+            
+            # 4. Status Deteksi
+            status = "Tidur"
+            if rvol > 3.0: status = "🚨 GAJAH MENGAMUK (Extreme Vol)"
+            elif rvol > 1.5 and abs(z_score) > 2: status = "🐘 Gajah Lewat (High Activity)"
+            elif rvol > 1.5: status = "👀 Akumulasi/Distribusi Senyap"
+            
+            radar_data.append({
+                "Ticker": ticker,
+                "Last Price": df['Close'].iloc[-1],
+                "Change %": daily_ret,
+                "RVOL (x)": rvol, # Volume X kali lipat rata-rata
+                "Z-Score": z_score, # Kekuatan pergerakan
+                "Status": status
+            })
+            
+        except Exception as e:
+            continue
+        
+        # Update progress
+        progress_bar.progress((i + 1) / len(tickers))
+        
+    return pd.DataFrame(radar_data)
+
+# --- UI UNTUK WHALE RADAR ---
+# Tambahkan ini di bagian sidebar atau main menu kamu
+
+st.divider()
+st.header("🐘 Whale Radar (Pelacak Institusi)")
+
+# Input Watchlist (Bisa diisi saham-saham pantauanmu)
+default_tickers = "BBCA.JK, BBRI.JK, TLKM.JK, BUMI.JK, GOTO.JK, MINA.JK, INET.JK"
+user_tickers = st.text_area("Masukkan Watchlist (pisahkan koma):", default_tickers)
+
+if st.button("SCAN WATCHLIST"):
+    # Bersihkan input
+    ticker_list = [t.strip() for t in user_tickers.split(",")]
+    
+    # Jalankan Scanner
+    results = whale_radar_scanner(ticker_list)
+    
+    if not results.empty:
+        # Sortir: Yang paling mencurigakan (RVOL tinggi) di atas
+        results = results.sort_values(by="RVOL (x)", ascending=False)
+        
+        # Format Tampilan
+        st.subheader("Hasil Pindai Radar:")
+        
+        # Highlight Baris yang "Gajah Lewat"
+        def highlight_elephant(row):
+            if "GAJAH" in row['Status']:
+                return ['background-color: #581845; color: white'] * len(row)
+            elif "Gajah" in row['Status']:
+                return ['background-color: #2E86C1; color: white'] * len(row)
+            else:
+                return [''] * len(row)
+
+        st.dataframe(
+            results.style.apply(highlight_elephant, axis=1)
+                         .format({"Last Price": "{:,.0f}", "Change %": "{:+.2f}%", "RVOL (x)": "{:.2f}x", "Z-Score": "{:.2f}"}),
+            use_container_width=True
+        )
+        
+        st.info("""
+        **Cara Membaca Radar:**
+        * **RVOL (Relative Volume):** Jika angka > 1.5x, artinya ada volume tidak wajar. Jika > 3.0x, Bandar sedang hajar kanan/kiri masif.
+        * **Z-Score:** Menunjukkan anomali harga. Jika positif besar (+2), harga ditarik naik paksa. Jika negatif besar (-2), harga dibanting.
+        * **Kombinasi Maut:** RVOL Tinggi + Z-Score Tinggi = **Validasi Tren (Ikuti Gajah).**
+        """)
+        
+    else:
+        st.warning("Tidak ada data ditemukan atau pasar tutup.")
