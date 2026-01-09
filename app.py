@@ -243,7 +243,7 @@ class MarketMakerBacktest:
         return self.data, self.trades, premium_total
 
 # ==========================================
-# 3. UI STREAMLIT (TAMPILAN KONSULTAN)
+# 3. UI STREAMLIT (TAMPILAN KONSULTAN) - REVISI MATA UANG
 # ==========================================
 
 with st.sidebar:
@@ -254,13 +254,22 @@ with st.sidebar:
     
     st.divider()
     
-    ticker = st.text_input("Ticker Saham:", "NVDA")
+    # --- FITUR BARU: PILIHAN MATA UANG ---
+    col_curr1, col_curr2 = st.columns(2)
+    with col_curr1:
+        currency_code = st.selectbox("Mata Uang:", ["USD", "IDR"])
+    with col_curr2:
+        # Simbol otomatis berubah
+        curr_sym = "$" if currency_code == "USD" else "Rp"
+        st.write(f"Simbol: **{curr_sym}**")
+    # -------------------------------------
+
+    ticker = st.text_input("Ticker Saham:", "MINA.JK" if currency_code == "IDR" else "NVDA")
     period = st.selectbox("Durasi Data:", ["5d", "1mo", "3mo"])
     
     st.divider()
     
     st.caption("Pengaturan Risiko")
-    # Slider menggantikan input manual
     delta_thresh = st.slider("Delta Threshold (Sensitivitas)", 0.05, 0.50, 0.10, 0.05)
     contracts = st.number_input("Jumlah Lot (Contracts)", 1, 100, 10)
     
@@ -272,10 +281,8 @@ with st.sidebar:
 if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
     with st.spinner("Sedang memproses data pasar & simulasi Greeks..."):
         
-        # Tentukan Tipe Posisi
         pos_type = PositionType.SHORT if "Market Maker" in client_mode else PositionType.LONG
         
-        # Konfigurasi Mesin
         config = MarketMakerConfig(
             ticker=ticker,
             position_type=pos_type,
@@ -285,7 +292,6 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             lookback_days=5 if period=="5d" else 60
         )
         
-        # Tarik Data
         loader = DataIngestion(config)
         raw_df = loader.fetch_data(ticker, period, "5m")
         
@@ -298,34 +304,33 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             
             # --- TAMPILAN DASHBOARD ---
             
-            # Judul
             st.title(f"♟️ Laporan Analisis: {ticker}")
             st.markdown(f"**Strategi:** `{pos_type.value} STRADDLE`")
             
-            # Metrik Utama (Kartu)
+            # Metrik Utama (Kartu) dengan FORMAT MATA UANG DINAMIS
             final = res_df.iloc[-1]
             c1, c2, c3, c4 = st.columns(4)
             
-            # Warna P&L
             pnl_color = "normal" if final['total_pnl'] > 0 else "inverse"
             
-            c1.metric("Total Net P&L", f"${final['total_pnl']:,.2f}", delta=f"{final['total_pnl']:,.2f}", delta_color=pnl_color)
-            c2.metric("P&L Opsi (Theta/Vega)", f"${final['opt_pnl']:,.2f}")
-            c3.metric("P&L Hedging (Scalping)", f"${(final['total_pnl'] - final['opt_pnl']):,.2f}")
+            # Menggunakan curr_sym (Rp/$) bukan hardcode '$'
+            c1.metric("Total Net P&L", f"{curr_sym} {final['total_pnl']:,.2f}", delta=f"{final['total_pnl']:,.2f}", delta_color=pnl_color)
+            c2.metric("P&L Opsi (Theta)", f"{curr_sym} {final['opt_pnl']:,.2f}")
+            c3.metric("P&L Scalping", f"{curr_sym} {(final['total_pnl'] - final['opt_pnl']):,.2f}")
             c4.metric("Jumlah Trade", len(trades))
             
-            # Tabs Visualisasi
             tab1, tab2, tab3 = st.tabs(["📈 Kinerja Keuangan", "⚠️ Audit Risiko", "📝 Log Transaksi"])
             
             with tab1:
-                st.subheader("Kurva Ekuitas (Equity Curve)")
-                # Grafik P&L menggunakan Matplotlib agar sama persis dengan gaya Don
+                st.subheader("Kurva Ekuitas")
                 fig, ax = plt.subplots(figsize=(10, 4))
                 ax.plot(res_df.index, res_df['total_pnl'], label='Total P&L', color='#00FF00' if final['total_pnl']>0 else '#FF3333', linewidth=2)
                 ax.fill_between(res_df.index, 0, res_df['total_pnl'], alpha=0.1, color='gray')
                 ax.axhline(0, color='white', linestyle='--', linewidth=0.5)
                 
-                # Styling Chart agar menyatu dengan Dark Mode Streamlit
+                # Update Label Grafik juga
+                ax.set_ylabel(f"P&L ({currency_code})")
+                
                 ax.set_facecolor('#0e1117')
                 fig.patch.set_facecolor('#0e1117')
                 ax.tick_params(colors='white')
@@ -337,31 +342,25 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
                 ax.spines['left'].set_color('white')
                 
                 st.pyplot(fig)
-                
-                st.info("Grafik ini menunjukkan pertumbuhan atau penyusutan modal bersih setelah dikurangi biaya hedging.")
 
             with tab2:
                 col_left, col_right = st.columns(2)
-                
                 with col_left:
                     st.markdown("#### Eksposur Net Delta")
                     st.line_chart(res_df['pos_delta'] + res_df['stock_pos'])
-                    st.caption("Garis ini harus mendekati nol. Lonjakan tajam menandakan risiko arah (Directional Risk).")
-                    
                 with col_right:
-                    st.markdown("#### Risiko Gamma (Sensitivitas)")
+                    st.markdown("#### Risiko Gamma")
                     st.line_chart(res_df['pos_gamma'])
-                    st.caption("Semakin tinggi grafik ini, semakin cepat Anda rugi jika harga bergerak liar.")
 
             with tab3:
                 if trades:
                     trade_df = pd.DataFrame([vars(t) for t in trades])
-                    # Format kolom agar rapi
-                    trade_df['price'] = trade_df['price'].map('${:,.2f}'.format)
-                    trade_df['transaction_cost'] = trade_df['transaction_cost'].map('${:,.2f}'.format)
+                    # Format kolom tabel dengan simbol mata uang
+                    trade_df['price'] = trade_df['price'].apply(lambda x: f"{curr_sym} {x:,.2f}")
+                    trade_df['transaction_cost'] = trade_df['transaction_cost'].apply(lambda x: f"{curr_sym} {x:,.2f}")
                     st.dataframe(trade_df, use_container_width=True)
                 else:
-                    st.write("Tidak ada aktivitas hedging (Pasar terlalu tenang).")
+                    st.write("Tidak ada aktivitas hedging.")
                     
         else:
-            st.error(f"Gagal mengambil data untuk {ticker}. Coba simbol lain.")
+            st.error(f"Gagal mengambil data untuk {ticker}. Pastikan ticker benar (misal: BBCA.JK untuk Indonesia).")
