@@ -31,8 +31,7 @@ This is why market makers MUST hedge continuously!
 ================================================================================
 """
 
-# ====================== CELL 1: INSTALLATION & IMPORTS ======================
-!pip install yfinance --quiet
+
 
 import numpy as np
 import pandas as pd
