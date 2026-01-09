@@ -32,11 +32,10 @@ st.markdown("""
     /* Styling khusus untuk Sinyal */
     .buy-signal {color: #00FF00; font-weight: bold;}
     .sell-signal {color: #FF3333; font-weight: bold;}
-    .neutral-signal {color: #888888;}
 </style>
 """, unsafe_allow_html=True)
 
-# Session State Init
+# Session State Init (Agar data tidak hilang saat klik tab lain)
 if 'analyzed' not in st.session_state: st.session_state.analyzed = False
 if 'pdf_bytes' not in st.session_state: st.session_state.pdf_bytes = None
 if 'ticker_file_name' not in st.session_state: st.session_state.ticker_file_name = "report"
@@ -44,7 +43,7 @@ if 'radar_results' not in st.session_state: st.session_state.radar_results = pd.
 if 'signal_results' not in st.session_state: st.session_state.signal_results = pd.DataFrame()
 
 # ==========================================
-# 2. MESIN 1: GAMMA SCALPING (AUDIT)
+# 2. MESIN 1: GAMMA SCALPING (AUDIT ENGINE)
 # ==========================================
 class PositionType(Enum):
     LONG = "LONG"
@@ -162,7 +161,7 @@ class MarketMakerBacktest:
         self.data['opt_pnl'] = [premium_total - l if self.config.position_type == PositionType.SHORT else l - premium_total for l in self.data['liability']]
         return self.data, self.trades, premium_total
 
-# --- PDF GENERATOR (Simplified) ---
+# --- PDF GENERATOR (FULL) ---
 class PDFReport(FPDF):
     def header(self): self.set_font('Arial', 'B', 15); self.cell(0, 10, "The Little Quant | Analysis Report", 0, 1, 'C'); self.ln(5)
     def footer(self): self.set_y(-15); self.set_font('Arial', 'I', 8); self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
@@ -171,16 +170,23 @@ def create_pdf(ticker, strategy_name, final_metrics, trades_df, figures):
     pdf = PDFReport(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", "B", 12); pdf.cell(0, 10, f"Ticker: {ticker} | Strategi: {strategy_name}", 0, 1)
     pdf.set_font("Arial", "", 10); pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d')}", 0, 1); pdf.ln(5)
-    pdf.set_fill_color(240, 240, 240); pdf.cell(0, 10, "Summary:", 0, 1, 'L', fill=True)
+    pdf.set_fill_color(240, 240, 240); pdf.cell(0, 10, "Executive Summary:", 0, 1, 'L', fill=True)
     pdf.cell(95, 10, f"Net P&L: {final_metrics['pnl_str']}", 1); pdf.cell(95, 10, f"Trades: {final_metrics['trades_count']}", 1, 1); pdf.ln(10)
-    pdf.cell(0, 10, "Visuals:", 0, 1)
+    pdf.cell(0, 10, "Risk & Performance Visuals:", 0, 1)
     for fig in figures:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             fig.savefig(tmp.name, bbox_inches='tight', dpi=100); pdf.image(tmp.name, x=10, w=190); pdf.ln(5)
+    
+    # Log Transaksi di PDF
+    pdf.add_page(); pdf.set_font("Arial", "B", 12); pdf.cell(0, 10, "Transaction Log (Last 20)", 0, 1)
+    pdf.set_font("Arial", "", 8); pdf.cell(40, 8, "Timestamp", 1); pdf.cell(20, 8, "Action", 1); pdf.cell(30, 8, "Price", 1); pdf.cell(30, 8, "Shares", 1); pdf.cell(30, 8, "Cost", 1, 1)
+    if not trades_df.empty:
+        for idx, row in trades_df.tail(20).iterrows():
+            pdf.cell(40, 8, str(row['timestamp']), 1); pdf.cell(20, 8, row['action'], 1); pdf.cell(30, 8, str(row['price']), 1); pdf.cell(30, 8, str(row['shares']), 1); pdf.cell(30, 8, str(row['transaction_cost']), 1, 1)
     return pdf.output(dest='S').encode('latin-1')
 
 # ==========================================
-# 3. MESIN 2: SMART WHALE RADAR
+# 3. MESIN 2: SMART WHALE RADAR (ROBUST)
 # ==========================================
 def whale_radar_scanner(tickers):
     radar_data = []
@@ -204,9 +210,9 @@ def whale_radar_scanner(tickers):
             body_pct = abs(last_close - last_open) / last_open if last_open > 0 else 0
             
             status = "Normal"; score = 0
-            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION"; score = 3
-            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP"; score = 2
-            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION"; score = 2
+            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION (Tembok)"; score = 3
+            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP (Akumulasi)"; score = 2
+            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION (Guyur)"; score = 2
             elif vol_z > 1.2: status = "👀 High Vol"; score = 1
             
             if score > 0:
@@ -219,90 +225,43 @@ def whale_radar_scanner(tickers):
     return pd.DataFrame(radar_data).sort_values(by=["_score", "Z-Score"], ascending=False).drop(columns=["_score"])
 
 # ==========================================
-# 4. MESIN 3: SIGNAL GENERATOR (BARU!)
+# 4. MESIN 3: SIGNAL GENERATOR
 # ==========================================
 def generate_signals(tickers):
-    """
-    Menganalisis indikator teknikal untuk memberikan rekomendasi BELI/JUAL
-    berdasarkan logika Quant (Mean Reversion & Momentum).
-    """
     signals = []
-    status_text = st.empty(); status_text.info("🎯 Mengkalkulasi Probabilitas..."); prog = st.progress(0)
+    status_text = st.empty(); status_text.info("🎯 Calculating Probabilities..."); prog = st.progress(0)
     clean_tickers = list(set([t.strip().upper() for t in tickers if t.strip() != ""]))
     
     for i, ticker in enumerate(clean_tickers):
         try:
-            # Ambil data lebih panjang untuk indikator (6 bulan)
             df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             if len(df) < 50: continue
-            
-            # --- Technical Indicators ---
             close = df['Close']
             
-            # RSI (14)
             delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-            curr_rsi = rsi.iloc[-1]
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss; rsi = 100 - (100 / (1 + rs)); curr_rsi = rsi.iloc[-1]
             
-            # Bollinger Bands (20, 2)
-            sma20 = close.rolling(window=20).mean()
-            std20 = close.rolling(window=20).std()
-            upper_bb = sma20 + (2 * std20)
-            lower_bb = sma20 - (2 * std20)
-            
+            sma20 = close.rolling(20).mean(); std20 = close.rolling(20).std()
+            upper_bb = sma20 + (2 * std20); lower_bb = sma20 - (2 * std20)
             curr_price = close.iloc[-1]
-            prev_price = close.iloc[-2]
             
-            # Moving Average Trend
-            sma50 = close.rolling(window=50).mean().iloc[-1]
-            trend = "BULL" if curr_price > sma50 else "BEAR"
+            sma50 = close.rolling(50).mean().iloc[-1]; trend = "BULL" if curr_price > sma50 else "BEAR"
             
-            # --- QUANT LOGIC (THE BRAIN) ---
-            action = "WAIT"
-            reason = "No Setup"
-            confidence = "Low"
+            action = "WAIT"; reason = "-"; confidence = "Low"
             
-            # STRATEGY 1: MEAN REVERSION (Buy The Dip)
-            # Syarat: Harga tembus BB Bawah + RSI Oversold (<30)
             if curr_price < lower_bb.iloc[-1] and curr_rsi < 35:
-                action = "BUY (Reversal)"
-                reason = f"Oversold (RSI {curr_rsi:.0f}) + Tembus BB Bawah"
-                confidence = "High"
-            
-            # STRATEGY 2: MOMENTUM BREAKOUT (Follow The Whale)
-            # Syarat: Harga tembus BB Atas + Tren Bullish
+                action = "BUY (Reversal)"; reason = f"Oversold (RSI {curr_rsi:.0f}) + Tembus BB Bawah"
             elif curr_price > upper_bb.iloc[-1] and trend == "BULL":
-                action = "BUY (Breakout)"
-                reason = "Momentum kuat tembus BB Atas"
-                confidence = "Medium"
-                
-            # STRATEGY 3: RSI DIVERGENCE (Simple Bearish)
+                action = "BUY (Breakout)"; reason = "Momentum kuat tembus BB Atas"
             elif curr_rsi > 75:
-                action = "SELL/TP"
-                reason = f"Overbought (RSI {curr_rsi:.0f}) - Rawan Koreksi"
-                confidence = "High"
-            
-            # STRATEGY 4: DEAD CAT BOUNCE (Short)
+                action = "SELL/TP"; reason = f"Overbought (RSI {curr_rsi:.0f})"
             elif trend == "BEAR" and curr_rsi > 60:
-                action = "SHORT"
-                reason = "Pantulan di Tren Turun (Bearish)"
-                confidence = "Medium"
+                action = "SHORT"; reason = "Pantulan di Tren Turun (Bearish)"
 
-            # Filter: Hanya tampilkan yang ada sinyal
             if action != "WAIT":
-                signals.append({
-                    "Ticker": ticker,
-                    "Price": curr_price,
-                    "Action": action,
-                    "Reason": reason,
-                    "Trend": trend,
-                    "RSI": f"{curr_rsi:.1f}"
-                })
-                
+                signals.append({"Ticker": ticker, "Price": curr_price, "Action": action, "Reason": reason, "Trend": trend, "RSI": f"{curr_rsi:.1f}"})
         except: continue
         prog.progress((i+1)/len(clean_tickers))
         
@@ -328,7 +287,7 @@ with st.sidebar:
 # --- TAB NAVIGASI ---
 tab_audit, tab_radar, tab_signal = st.tabs(["📊 Audit Strategi", "🐘 Whale Radar", "🎯 Signal Generator"])
 
-# 1. TAB AUDIT (Existing)
+# 1. TAB AUDIT (RESTORED FULL FEATURES)
 with tab_audit:
     if st.button("JALANKAN AUDIT", type="primary"):
         with st.spinner("Processing..."):
@@ -342,8 +301,8 @@ with tab_audit:
                 st.session_state.pos=pos; st.session_state.tick=ticker_in
                 
                 # Metrics for PDF
-                met = {"pnl_str": f"{sym} {res['total_pnl'].iloc[-1]:,.0f}", "opt_str": f"{sym} {res['opt_pnl'].iloc[-1]:,.0f}", 
-                       "hed_str": f"{sym} {(res['total_pnl'].iloc[-1]-res['opt_pnl'].iloc[-1]):,.0f}", "trades_count": str(len(trd))}
+                met = {"pnl_str": f"{sym} {res['total_pnl'].iloc[-1]:,.2f}", "opt_str": f"{sym} {res['opt_pnl'].iloc[-1]:,.2f}", 
+                       "hed_str": f"{sym} {(res['total_pnl'].iloc[-1]-res['opt_pnl'].iloc[-1]):,.2f}", "trades_count": str(len(trd))}
                 # Figs
                 figs=[]; f1,ax=plt.subplots(figsize=(10,4)); ax.plot(res.index, res['total_pnl']); ax.set_title("P&L"); figs.append(f1)
                 f2,(axa,axb)=plt.subplots(2,1,figsize=(10,8)); axa.plot(res['pos_delta']+res['stock_pos']); axb.plot(res['pos_gamma']); figs.append(f2)
@@ -351,12 +310,48 @@ with tab_audit:
 
     if st.session_state.analyzed:
         fin = st.session_state.res_df.iloc[-1]
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Net P&L", f"{sym} {fin['total_pnl']:,.0f}", delta_color="normal")
-        c2.metric("Option Income", f"{sym} {fin['opt_pnl']:,.0f}")
-        c3.metric("Trades", len(st.session_state.trades))
-        st.line_chart(st.session_state.res_df['total_pnl'])
-        if st.session_state.pdf_bytes: st.download_button("Download PDF", st.session_state.pdf_bytes, "report.pdf", "application/pdf")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Net P&L", f"{sym} {fin['total_pnl']:,.2f}", delta_color="normal")
+        c2.metric("Option Income", f"{sym} {fin['opt_pnl']:,.2f}")
+        c3.metric("Hedge Cost", f"{sym} {(fin['total_pnl'] - fin['opt_pnl']):,.2f}")
+        c4.metric("Trades", len(st.session_state.trades))
+        
+        # --- RESTORED SUB-TABS (Fitur yang sempat hilang) ---
+        sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📈 Kurva Ekuitas", "⚠️ Risiko Gamma", "📝 Log Transaksi"])
+        
+        with sub_tab1:
+            st.subheader("Kurva P&L")
+            fig1, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(st.session_state.res_df.index, st.session_state.res_df['total_pnl'], color='#00FF00', linewidth=1.5)
+            ax.axhline(0, color='white', linestyle='--', linewidth=0.5)
+            # Dark mode friendly plot
+            ax.set_facecolor('#0e1117'); fig1.patch.set_facecolor('#0e1117')
+            ax.tick_params(colors='white'); ax.spines['bottom'].set_color('white'); ax.spines['left'].set_color('white')
+            st.pyplot(fig1)
+
+        with sub_tab2:
+            st.subheader("Audit Profil Risiko")
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("#### Net Delta (Arah)")
+                st.line_chart(st.session_state.res_df['pos_delta'] + st.session_state.res_df['stock_pos'])
+            with c_right:
+                st.markdown("#### Gamma Risk (Percepatan)")
+                st.line_chart(st.session_state.res_df['pos_gamma'])
+
+        with sub_tab3:
+            st.subheader("Rekaman Transaksi Robot")
+            if st.session_state.trades:
+                trade_df = pd.DataFrame([vars(t) for t in st.session_state.trades])
+                fmt_df = trade_df.copy()
+                fmt_df['price'] = fmt_df['price'].apply(lambda x: f"{sym} {x:,.2f}")
+                st.dataframe(fmt_df, use_container_width=True)
+            else:
+                st.info("Tidak ada transaksi hedging.")
+
+        st.divider()
+        if st.session_state.pdf_bytes: 
+            st.download_button("📄 Download PDF Laporan Lengkap", st.session_state.pdf_bytes, st.session_state.ticker_file_name, "application/pdf")
 
 # 2. TAB WHALE RADAR
 with tab_radar:
@@ -367,38 +362,31 @@ with tab_radar:
         st.session_state.radar_results = whale_radar_scanner(usr_tick.split(","))
     
     if not st.session_state.radar_results.empty:
-        st.dataframe(st.session_state.radar_results.style.format({"Price":"{:,.0f}", "Z-Score":"{:.2f}", "RVOL":"{:.1f}x"}), use_container_width=True)
+        # Highlight Style
+        def highlight_row(row):
+            if "ABSORPTION" in row['Status']: return ['background-color: #4a148c; color: white'] * len(row)
+            elif "MARK-UP" in row['Status']: return ['background-color: #1b5e20; color: white'] * len(row)
+            elif "DISTRIBUTION" in row['Status']: return ['background-color: #b71c1c; color: white'] * len(row)
+            return [''] * len(row)
+            
+        st.dataframe(st.session_state.radar_results.style.apply(highlight_row, axis=1).format({"Price":"{:,.0f}", "Z-Score":"{:.2f}", "RVOL":"{:.1f}x"}), use_container_width=True)
 
-# 3. TAB SIGNAL GENERATOR (NEW)
+# 3. TAB SIGNAL GENERATOR
 with tab_signal:
     st.subheader("Mesin Pencari Sinyal (The Alpha Scanner)")
-    st.caption("Menganalisis RSI, Bollinger Bands, dan Tren untuk entry point presisi.")
-    
     col_sig1, col_sig2 = st.columns([3,1])
-    sig_tickers = col_sig1.text_area("Watchlist Sinyal (Saham/Forex/Crypto):", 
-                                     "BBCA.JK, BBRI.JK, TLKM.JK, ADRO.JK, UNTR.JK, BTC-USD, EURUSD=X", height=70)
-    
+    sig_tickers = col_sig1.text_area("Watchlist Sinyal:", "BBCA.JK, BBRI.JK, TLKM.JK, ADRO.JK, UNTR.JK, BTC-USD, EURUSD=X", height=70)
     if col_sig2.button("CARI PELUANG", type="primary"):
         st.session_state.signal_results = generate_signals(sig_tickers.split(","))
         
     if not st.session_state.signal_results.empty:
         res = st.session_state.signal_results
-        
-        # Pisahkan Bullish dan Bearish
-        bull = res[res['Action'].str.contains("BUY")]
-        bear = res[res['Action'].str.contains("SELL") | res['Action'].str.contains("SHORT")]
+        bull = res[res['Action'].str.contains("BUY")]; bear = res[res['Action'].str.contains("SELL") | res['Action'].str.contains("SHORT")]
         
         c_bull, c_bear = st.columns(2)
         with c_bull:
             st.success(f"🟢 Peluang Beli ({len(bull)})")
-            if not bull.empty:
-                st.dataframe(bull[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
-            else: st.write("Belum ada setup Beli.")
-            
+            if not bull.empty: st.dataframe(bull[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
         with c_bear:
             st.error(f"🔴 Peluang Jual ({len(bear)})")
-            if not bear.empty:
-                st.dataframe(bear[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
-            else: st.write("Belum ada setup Jual.")
-            
-        st.info("**Logika Quant:**\n1. **BUY (Reversal):** Harga tembus BB Bawah + RSI < 35 (Diskon).\n2. **BUY (Breakout):** Harga tembus BB Atas + Tren Naik (Follow Gajah).")
+            if not bear.empty: st.dataframe(bear[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
