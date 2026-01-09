@@ -49,9 +49,11 @@ if 'pdf_bytes' not in st.session_state:
     st.session_state.pdf_bytes = None
 if 'ticker_file_name' not in st.session_state:
     st.session_state.ticker_file_name = "report"
+if 'radar_results' not in st.session_state:
+    st.session_state.radar_results = pd.DataFrame()
 
 # ==========================================
-# 3. LOGIC MESIN ANALISIS
+# 3. LOGIC MESIN ANALISIS (GAMMA SCALPING)
 # ==========================================
 class PositionType(Enum):
     LONG = "LONG"
@@ -259,7 +261,92 @@ def create_pdf(ticker, strategy_name, final_metrics, trades_df, figures):
     return pdf.output(dest='S').encode('latin-1')
 
 # ==========================================
-# 4. DASHBOARD UI & LOGIC
+# 4. SMART WHALE RADAR (#5 - FITUR BARU)
+# ==========================================
+def whale_radar_scanner(tickers):
+    """
+    Memindai daftar saham untuk mencari anomali Volume & Volatilitas
+    Menggunakan Logika 'Absorption' (Volume Tinggi tapi Harga Diam)
+    """
+    radar_data = []
+    
+    status_text = st.empty()
+    status_text.write("📡 Menyalakan Radar... Memindai Jejak Institusi...")
+    progress_bar = st.progress(0)
+    
+    for i, ticker in enumerate(tickers):
+        try:
+            # Ambil data intraday/harian
+            df = yf.download(ticker, period="3mo", progress=False)
+            
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            if len(df) < 20: continue
+            
+            # 1. DATA PERSIAPAN
+            last_close = df['Close'].iloc[-1]
+            last_open = df['Open'].iloc[-1]
+            last_vol = df['Volume'].iloc[-1]
+            
+            # 2. STATISTIK VOLUME (Z-SCORE)
+            vol_mean = df['Volume'].rolling(20).mean()
+            vol_std = df['Volume'].rolling(20).std()
+            
+            # Z-Score: (Volume Hari Ini - Rata2) / Std Dev
+            vol_z_score = (last_vol - vol_mean.iloc[-1]) / vol_std.iloc[-1] if vol_std.iloc[-1] > 0 else 0
+            rvol = last_vol / vol_mean.iloc[-1] if vol_mean.iloc[-1] > 0 else 0
+            
+            # 3. PRICE ACTION
+            body_size_pct = abs(last_close - last_open) / last_open
+            
+            # 4. LOGIKA DETEKSI (THE BRAIN)
+            status = "Tidur"
+            score = 0
+            
+            # SKENARIO A: ABSORPTION (Saran Gem Poin 4 - Doji + Volledak)
+            if vol_z_score > 2.5 and body_size_pct < 0.005:
+                status = "🛡️ ABSORPTION (Tembok Institusi)"
+                score = 3
+            # SKENARIO B: AGGRESSIVE MARKUP
+            elif vol_z_score > 3.0 and (last_close > last_open):
+                status = "🚀 MARK-UP (Gajah Hajar Kanan)"
+                score = 2
+            # SKENARIO C: AGGRESSIVE MARKDOWN
+            elif vol_z_score > 3.0 and (last_close < last_open):
+                status = "🔻 DISTRIBUTION (Gajah Guyur)"
+                score = 2
+            # SKENARIO D: HIGH ACTIVITY
+            elif vol_z_score > 1.5:
+                status = "👀 Akumulasi/Distribusi Senyap"
+                score = 1
+            
+            if score > 0:
+                radar_data.append({
+                    "Ticker": ticker,
+                    "Price": last_close,
+                    "Vol Z-Score": vol_z_score,
+                    "RVOL": rvol,
+                    "Candle Body": f"{body_size_pct*100:.2f}%",
+                    "Status": status,
+                    "_score": score
+                })
+            
+        except Exception as e:
+            continue
+        
+        progress_bar.progress((i + 1) / len(tickers))
+    
+    status_text.empty()
+    progress_bar.empty()
+    
+    if not radar_data:
+        return pd.DataFrame()
+        
+    return pd.DataFrame(radar_data).sort_values(by=["_score", "Vol Z-Score"], ascending=False).drop(columns=["_score"])
+
+# ==========================================
+# 5. DASHBOARD UI (MAIN APP)
 # ==========================================
 
 with st.sidebar:
@@ -293,7 +380,7 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             engine = MarketMakerBacktest(config, df)
             res_df, trades, premium = engine.run()
             
-            # SIMPAN HASIL KE SESSION STATE AGAR TIDAK HILANG
+            # SIMPAN HASIL KE SESSION STATE
             st.session_state.analyzed = True
             st.session_state.res_df = res_df
             st.session_state.trades = trades
@@ -302,7 +389,7 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             st.session_state.ticker = ticker
             st.session_state.ticker_file_name = f"Quant_Report_{ticker}_{datetime.now().strftime('%Y%m%d')}.pdf"
             
-            # GENERATE PDF DISINI SEKALIGUS
+            # GENERATE PDF
             metrics_data = {
                 "pnl_str": f"{curr_sym} {res_df['total_pnl'].iloc[-1]:,.2f}",
                 "opt_str": f"{curr_sym} {res_df['opt_pnl'].iloc[-1]:,.2f}",
@@ -310,10 +397,7 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
                 "trades_count": str(len(trades))
             }
             
-            # Buat grafik untuk PDF (tanpa st.pyplot)
             pdf_figs = []
-            
-            # Fig 1
             fig1, ax = plt.subplots(figsize=(10, 4))
             ax.plot(res_df.index, res_df['total_pnl'], label='Total P&L', color='#00FF00' if res_df['total_pnl'].iloc[-1]>0 else '#FF3333', linewidth=2)
             ax.axhline(0, color='black', linestyle='--', linewidth=0.5)
@@ -321,7 +405,6 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             ax.set_title("Cumulative P&L")
             pdf_figs.append(fig1)
             
-            # Fig 2
             fig2, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
             ax_a.plot(res_df.index, res_df['pos_delta'] + res_df['stock_pos'], color='#F39C12')
             ax_a.set_title("Net Delta Exposure")
@@ -329,7 +412,6 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
             ax_b.set_title("Gamma Risk")
             pdf_figs.append(fig2)
             
-            # Simpan PDF bytes ke session state
             st.session_state.pdf_bytes = create_pdf(
                 ticker=ticker,
                 strategy_name=f"{pos_type.value} STRADDLE",
@@ -337,11 +419,10 @@ if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
                 trades_df=pd.DataFrame([vars(t) for t in trades]) if trades else pd.DataFrame(),
                 figures=pdf_figs
             )
-            
         else:
             st.error(f"Gagal mengambil data untuk {ticker}.")
 
-# --- RENDER HASIL DARI MEMORI (ANTI-RESET) ---
+# --- RENDER HASIL AUDIT ---
 if st.session_state.analyzed:
     res_df = st.session_state.res_df
     trades = st.session_state.trades
@@ -399,10 +480,7 @@ if st.session_state.analyzed:
         else:
             st.write("Pasar tenang. Tidak ada hedging yang tereksekusi.")
 
-    # --- TOMBOL DOWNLOAD (DARI CACHE) ---
     st.divider()
-    st.subheader("🖨️ Ekspor Laporan")
-    
     if st.session_state.pdf_bytes:
         st.download_button(
             label="📄 Download PDF Lengkap",
@@ -412,102 +490,44 @@ if st.session_state.analyzed:
             type="primary"
         )
 
-
 # ==========================================
-# 5. FITUR TAMBAHAN: WHALE RADAR (SMART QUANT VERSION)
+# 6. WHALE RADAR UI (BAGIAN BAWAH)
 # ==========================================
+st.divider()
+st.header("🐘 Smart Whale Radar (Deteksi Institusi)")
+st.caption("Mendeteksi Volume Z-Score & Absorption (Tembok Gajah)")
 
-def whale_radar_scanner(tickers):
-    """
-    Memindai daftar saham untuk mencari anomali Volume & Volatilitas
-    Menggunakan Logika 'Absorption' (Volume Tinggi tapi Harga Diam)
-    """
-    radar_data = []
-    
-    st.write("📡 Menyalakan Radar... Memindai Jejak Institusi...")
-    progress_bar = st.progress(0)
-    
-    for i, ticker in enumerate(tickers):
-        try:
-            # Ambil data intraday (agar lebih presisi menangkap aksi hari ini)
-            # Kita pakai '1d' interval '1m' atau '5m' kalau pasar buka, 
-            # atau '1mo' interval '1d' untuk swing. Kita pakai Daily standar biar aman.
-            df = yf.download(ticker, period="3mo", progress=False)
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-                
-            if len(df) < 20: continue
-            
-            # --- 1. DATA PERSIAPAN ---
-            last_close = df['Close'].iloc[-1]
-            last_open = df['Open'].iloc[-1]
-            last_vol = df['Volume'].iloc[-1]
-            
-            # --- 2. STATISTIK VOLUME (Z-SCORE) ---
-            # Hitung rata-rata dan standar deviasi volume 20 hari
-            vol_mean = df['Volume'].rolling(20).mean()
-            vol_std = df['Volume'].rolling(20).std()
-            
-            # Z-Score Volume: (Volume Hari Ini - Rata2) / Standar Deviasi
-            # Gem bilang: > 3 Sigma (3.0) adalah anomali
-            vol_z_score = (last_vol - vol_mean.iloc[-1]) / vol_std.iloc[-1] if vol_std.iloc[-1] > 0 else 0
-            
-            # RVOL biasa (untuk perbandingan)
-            rvol = last_vol / vol_mean.iloc[-1] if vol_mean.iloc[-1] > 0 else 0
-            
-            # --- 3. PRICE ACTION (CANDLE BODY) ---
-            # Seberapa besar harga bergerak? (Body Candle)
-            body_size_pct = abs(last_close - last_open) / last_open
-            
-            # --- 4. LOGIKA DETEKSI (THE BRAIN) ---
-            status = "Tidur"
-            score = 0
-            
-            # SKENARIO A: ABSORPTION (Saran Gem Poin 4)
-            # Volume Meledak (Z > 2.5) TAPI Harga Diam (Body < 0.5%)
-            # Artinya: Ada tembok besar yang menelan semua order.
-            if vol_z_score > 2.5 and body_size_pct < 0.005:
-                status = "🛡️ ABSORPTION (Tembok Institusi)"
-                score = 3 # Prioritas Tinggi
-                
-            # SKENARIO B: AGGRESSIVE MARKUP (Gajah Mengamuk)
-            # Volume Meledak DAN Harga Naik Kencang
-            elif vol_z_score > 3.0 and (last_close > last_open):
-                status = "🚀 MARK-UP (Gajah Hajar Kanan)"
-                score = 2
-                
-            # SKENARIO C: AGGRESSIVE MARKDOWN (Gajah Buang Barang)
-            # Volume Meledak DAN Harga Turun Kencang
-            elif vol_z_score > 3.0 and (last_close < last_open):
-                status = "🔻 DISTRIBUTION (Gajah Guyur)"
-                score = 2
-                
-            # SKENARIO D: HIGH ACTIVITY
-            elif vol_z_score > 1.5:
-                status = "👀 Akumulasi/Distribusi Senyap"
-                score = 1
-            
-            # Hanya masukkan ke list jika ada aktivitas (Score > 0)
-            if score > 0:
-                radar_data.append({
-                    "Ticker": ticker,
-                    "Price": last_close,
-                    "Vol Z-Score": vol_z_score, # Ini Sigma yang dimaksud Gem
-                    "RVOL": rvol,
-                    "Candle Body": f"{body_size_pct*100:.2f}%",
-                    "Status": status,
-                    "_score": score # Helper untuk sorting
-                })
-            
-        except Exception as e:
-            continue
-        
-        progress_bar.progress((i + 1) / len(tickers))
-        
-    if not radar_data:
-        return pd.DataFrame()
-        
-    # Sortir berdasarkan urgensi (Absorption paling atas)
-    return pd.DataFrame(radar_data).sort_values(by=["_score", "Vol Z-Score"], ascending=False).drop(columns=["_score"])
+col_radar1, col_radar2 = st.columns([3, 1])
+with col_radar1:
+    default_tickers = "BBCA.JK, BBRI.JK, TLKM.JK, BUMI.JK, GOTO.JK, MINA.JK, INET.JK, NVDA, TSLA"
+    user_tickers = st.text_area("Watchlist (pisahkan koma):", default_tickers, height=70)
+with col_radar2:
+    st.write("")
+    st.write("")
+    if st.button("SCAN WATCHLIST", use_container_width=True):
+        ticker_list = [t.strip() for t in user_tickers.split(",")]
+        st.session_state.radar_results = whale_radar_scanner(ticker_list)
 
+if not st.session_state.radar_results.empty:
+    st.subheader("Hasil Pindai Radar:")
+    
+    def highlight_elephant(row):
+        if "ABSORPTION" in row['Status']:
+            return ['background-color: #581845; color: white'] * len(row)
+        elif "MARK-UP" in row['Status'] or "DISTRIBUTION" in row['Status']:
+            return ['background-color: #2E86C1; color: white'] * len(row)
+        else:
+            return [''] * len(row)
+
+    st.dataframe(
+        st.session_state.radar_results.style.apply(highlight_elephant, axis=1)
+                     .format({"Price": "{:,.2f}", "Vol Z-Score": "{:.2f}", "RVOL": "{:.2f}x"}),
+        use_container_width=True
+    )
+    
+    st.info("""
+    **Panduan Radar:**
+    * **🛡️ ABSORPTION:** Volume Meledak (Z-Score > 2.5) tapi Harga Diam (Doji). Ada "tembok" yang menelan order. Potensi Reversal kuat.
+    * **🚀 MARK-UP:** Volume Tinggi + Harga Naik. Gajah sedang Hajar Kanan.
+    * **Vol Z-Score:** Angka > 3.0 artinya kejadian langka (99.7% anomali). Pasti institusi.
+    """)
