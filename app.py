@@ -185,64 +185,108 @@ def create_pdf(ticker, strategy_name, final_metrics, trades_df, figures):
             pdf.cell(40, 8, str(row['timestamp']), 1); pdf.cell(20, 8, row['action'], 1); pdf.cell(30, 8, str(row['price']), 1); pdf.cell(30, 8, str(row['shares']), 1); pdf.cell(30, 8, str(row['transaction_cost']), 1, 1)
     return pdf.output(dest='S').encode('latin-1')
 
-# ==========================================
-# 3. MESIN 2: SMART WHALE RADAR (ROBUST)
+# =========================================# ==========================================
+# 3. MESIN 2: SMART WHALE RADAR (FIXED & UPGRADED)
 # ==========================================
 def whale_radar_scanner(tickers):
     radar_data = []
-    status_text = st.empty(); status_text.info("📡 Scanning Whale Activity..."); prog = st.progress(0)
+    
+    # UI Feedback
+    status_text = st.empty()
+    status_text.info("📡 Menyalakan Radar... Memindai Jejak Institusi...")
+    prog = st.progress(0)
+    
+    # Bersihkan input ticker
     clean_tickers = list(set([t.strip().upper() for t in tickers if t.strip() != ""]))
     
     for i, ticker in enumerate(clean_tickers):
         try:
+            # Download data
             df = yf.download(ticker, period="3mo", progress=False, auto_adjust=True)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            if df.empty or len(df) < 20: continue
+            
+            # Handle MultiIndex column issue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            # Skip jika data kosong/kurang
+            if df.empty or len(df) < 20: 
+                continue
+            
             df = df.dropna()
             
-            last_close = float(df['Close'].iloc[-1]); last_open = float(df['Open'].iloc[-1]); last_vol = float(df['Volume'].iloc[-1])
-            if last_vol == 0: continue
+            # Ambil data terakhir
+            last_close = float(df['Close'].iloc[-1])
+            last_open = float(df['Open'].iloc[-1])
+            last_vol = float(df['Volume'].iloc[-1])
             
+            if last_vol == 0: 
+                continue
+            
+            # Hitung Statistik 20 Hari Terakhir
             history = df.iloc[:-1]
-            vol_mean = history['Volume'].tail(20).mean(); vol_std = history['Volume'].tail(20).std()
+            vol_mean = history['Volume'].tail(20).mean()
+            vol_std = history['Volume'].tail(20).std()
+            
+            # Z-Score Volume
             vol_z = (last_vol - vol_mean) / vol_std if vol_std > 0 else 0
             rvol = last_vol / vol_mean if vol_mean > 0 else 0
+            
+            # Persentase Gerak Body Candle
             body_pct = abs(last_close - last_open) / last_open if last_open > 0 else 0
             
-            status = "Normal"; score = 0
-            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION (Tembok)"; score = 3
-            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP (Akumulasi)"; score = 2
-            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION (Guyur)"; score = 2
-            elif vol_z > 1.2: status = "👀 High Vol"; score = 1
+            # --- LOGIKA DETEKSI (THE BRAIN) ---
+            status = "Normal"
+            score = 0
             
+            # 1. Gajah Asli (Volume Meledak)
+            if vol_z > 2.0 and body_pct < 0.005: 
+                status = "🛡️ ABSORPTION (Tembok)"
+                score = 3
+            elif vol_z > 2.0 and last_close > last_open: 
+                status = "🚀 MARK-UP (Akumulasi)"
+                score = 3
+            elif vol_z > 2.0 and last_close < last_open: 
+                status = "🔻 DISTRIBUTION (Guyur)"
+                score = 3
+            
+            # 2. Badai Volatilitas (Tanpa Volume Gajah) - Kasus BULL.JK
+            # Jika harga gerak liar (>3%) tapi volume biasa saja
+            elif body_pct > 0.03:
+                status = "🌪️ VOLATILE (Gerak Liar)"
+                score = 2
+            
+            # 3. Aktivitas Sedang
+            elif vol_z > 1.2: 
+                status = "👀 High Vol"
+                score = 1
+            
+            # Masukkan ke hasil jika ada score
             if score > 0:
-                radar_data.append({"Ticker": ticker, "Price": last_close, "Z-Score": vol_z, "RVOL": rvol, "Status": status, "_score": score})
-        except: continue
+                radar_data.append({
+                    "Ticker": ticker, 
+                    "Price": last_close, 
+                    "Z-Score": vol_z, 
+                    "RVOL": rvol, 
+                    "Status": status, 
+                    "_score": score
+                })
+                
+        except Exception as e:
+            continue
+        
+        # Update progress bar
         prog.progress((i+1)/len(clean_tickers))
         
-    status_text.empty(); prog.empty()
-    if not radar_data: return pd.DataFrame()
+    status_text.empty()
+    prog.empty()
+    
+    if not radar_data: 
+        return pd.DataFrame()
+    
+    # Urutkan berdasarkan Score tertinggi
     return pd.DataFrame(radar_data).sort_values(by=["_score", "Z-Score"], ascending=False).drop(columns=["_score"])
-
-            status = "Normal"; score = 0
-            
-            # 1. DETEKSI VOLUME (WHALE ASLI)
-            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION (Tembok)"; score = 3
-            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP (Akumulasi)"; score = 3
-            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION (Guyur)"; score = 3
-            
-            # 2. DETEKSI VOLATILITAS HARGA (Tambahan untuk kasus BULL)
-            # Jika harga gerak > 3% hari ini TAPI volume biasa aja -> Ritel/Bandar Kecil beraksi
-            elif body_pct > 0.03: 
-                status = "🌪️ VOLATILE (Gerak Liar)"; score = 2
-            
-            # 3. DETEKSI VOLUME RINGAN
-            elif vol_z > 1.2: status = "👀 High Vol"; score = 1
-            
-            if score > 0:
-
-
-# ==========================================
+ ==========================================
+#
 # 4. MESIN 3: SIGNAL GENERATOR
 # ==========================================
 def generate_signals(tickers):
