@@ -285,7 +285,7 @@ def whale_radar_scanner(tickers):
     
     # Urutkan berdasarkan Score tertinggi
     return pd.DataFrame(radar_data).sort_values(by=["_score", "Z-Score"], ascending=False).drop(columns=["_score"])
- ==========================================
+ # ==========================================
 #
 # 4. MESIN 3: SIGNAL GENERATOR
 # ==========================================
