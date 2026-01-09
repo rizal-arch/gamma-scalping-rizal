@@ -8,6 +8,7 @@ from typing import List
 from enum import Enum
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from datetime import datetime  # <-- INI YANG TADI KURANG
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -38,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. LOGIC MESIN (Diadaptasi dari 'Untuk market maker.txt')
+# 2. LOGIC MESIN
 # ==========================================
 
 class PositionType(Enum):
@@ -170,8 +171,6 @@ class MarketMakerBacktest:
         self.data['T'] = (self.config.time_to_expiry_days/365 - self.data['bar_index']/(bars_per_day*252)).clip(1e-6)
         
         # 2. Hitung Greeks (BSM)
-        # Kita gunakan Implied Vol untuk menentukan harga Premium Awal (saat jual)
-        # Tapi gunakan Realized Vol untuk Mark-to-Market harian
         bsm_res = bsm_vectorized(
             self.data['price'], strike, self.data['T'], 
             self.config.risk_free_rate, 
