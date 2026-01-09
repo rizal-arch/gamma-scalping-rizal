@@ -3,3 +3,4 @@ yfinance
 matplotlib
 pandas
 scipy
+fpdf
