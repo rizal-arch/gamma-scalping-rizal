@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import List
 from enum import Enum
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from datetime import datetime
 import warnings
 from fpdf import FPDF
@@ -17,43 +16,35 @@ import os
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN
+# 1. KONFIGURASI & CSS
 # ==========================================
 st.set_page_config(
-    page_title="Don's Quantitative Terminal",
+    page_title="The Little Quant Terminal",
     page_icon="♟️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
     .stApp {background-color: #0e1117;}
-    .metric-card {
-        background-color: #262730;
-        border: 1px solid #4e4f52;
-        padding: 15px;
-        border-radius: 5px;
-        color: white;
-    }
+    .metric-card {background-color: #262730; border: 1px solid #4e4f52; padding: 15px; border-radius: 5px; color: white;}
+    /* Styling khusus untuk Sinyal */
+    .buy-signal {color: #00FF00; font-weight: bold;}
+    .sell-signal {color: #FF3333; font-weight: bold;}
+    .neutral-signal {color: #888888;}
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. INISIALISASI SESSION STATE (INGATAN)
-# ==========================================
-if 'analyzed' not in st.session_state:
-    st.session_state.analyzed = False
-if 'pdf_bytes' not in st.session_state:
-    st.session_state.pdf_bytes = None
-if 'ticker_file_name' not in st.session_state:
-    st.session_state.ticker_file_name = "report"
-if 'radar_results' not in st.session_state:
-    st.session_state.radar_results = pd.DataFrame()
+# Session State Init
+if 'analyzed' not in st.session_state: st.session_state.analyzed = False
+if 'pdf_bytes' not in st.session_state: st.session_state.pdf_bytes = None
+if 'ticker_file_name' not in st.session_state: st.session_state.ticker_file_name = "report"
+if 'radar_results' not in st.session_state: st.session_state.radar_results = pd.DataFrame()
+if 'signal_results' not in st.session_state: st.session_state.signal_results = pd.DataFrame()
 
 # ==========================================
-# 3. LOGIC MESIN ANALISIS (GAMMA SCALPING)
+# 2. MESIN 1: GAMMA SCALPING (AUDIT)
 # ==========================================
 class PositionType(Enum):
     LONG = "LONG"
@@ -78,12 +69,9 @@ class MarketMakerConfig:
     slippage_bps: float = 2.0
     
     @property
-    def total_tc_bps(self) -> float:
-        return self.stock_commission_bps + self.slippage_bps
-    
+    def total_tc_bps(self) -> float: return self.stock_commission_bps + self.slippage_bps
     @property
-    def position_sign(self) -> int:
-        return 1 if self.position_type == PositionType.LONG else -1
+    def position_sign(self) -> int: return 1 if self.position_type == PositionType.LONG else -1
 
 def bsm_vectorized(S, K, T, r, sigma, position_sign=1):
     T = T.clip(lower=1e-10)
@@ -91,17 +79,14 @@ def bsm_vectorized(S, K, T, r, sigma, position_sign=1):
     sqrt_T = np.sqrt(T)
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
     d2 = d1 - sigma * sqrt_T
-    N_d1 = norm.cdf(d1)
-    N_d2 = norm.cdf(d2)
-    N_neg_d1 = norm.cdf(-d1)
-    N_neg_d2 = norm.cdf(-d2)
+    N_d1 = norm.cdf(d1); N_d2 = norm.cdf(d2)
+    N_neg_d1 = norm.cdf(-d1); N_neg_d2 = norm.cdf(-d2)
     n_d1 = norm.pdf(d1)
     discount = np.exp(-r * T)
     call_price = S * N_d1 - K * discount * N_d2
     put_price = K * discount * N_neg_d2 - S * N_neg_d1
     straddle_price = call_price + put_price
-    call_delta = N_d1
-    put_delta = N_d1 - 1
+    call_delta = N_d1; put_delta = N_d1 - 1
     straddle_delta = call_delta + put_delta
     gamma = n_d1 / (S * sigma * sqrt_T)
     theta_term1 = -(S * n_d1 * sigma) / (2 * sqrt_T)
@@ -109,25 +94,19 @@ def bsm_vectorized(S, K, T, r, sigma, position_sign=1):
     theta_put = (theta_term1 + r * K * discount * N_neg_d2) / 365
     straddle_theta = theta_call + theta_put
     return pd.DataFrame({
-        'price': S,
-        'straddle_price_raw': straddle_price,
+        'price': S, 'straddle_price_raw': straddle_price,
         'pos_value': straddle_price * position_sign,
         'pos_delta': straddle_delta * position_sign,
-        'pos_gamma': 2 * gamma,
-        'pos_theta': straddle_theta * position_sign * -1,
+        'pos_gamma': 2 * gamma, 'pos_theta': straddle_theta * position_sign * -1,
     })
 
 class DataIngestion:
-    def __init__(self, config):
-        self.config = config
-    
+    def __init__(self, config): self.config = config
     @st.cache_data(ttl=3600, show_spinner=False)
     def fetch_data(_self, ticker, period, interval):
         data = yf.download(ticker, period=period, interval=interval, progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         return data
-
     def process(self, df):
         df = df.dropna(subset=['Close']).copy()
         df['price'] = df['Close']
@@ -141,27 +120,15 @@ class DataIngestion:
 
 @dataclass
 class HedgeTrade:
-    timestamp: datetime
-    action: str
-    shares: int
-    price: float
-    transaction_cost: float
+    timestamp: datetime; action: str; shares: int; price: float; transaction_cost: float
 
 class MarketMakerBacktest:
-    def __init__(self, config, market_data):
-        self.config = config
-        self.data = market_data.copy()
-        self.trades = []
-        
+    def __init__(self, config, market_data): self.config = config; self.data = market_data.copy(); self.trades = []
     def run(self):
-        first_price = self.data['price'].iloc[0]
-        strike = round(first_price)
+        first_price = self.data['price'].iloc[0]; strike = round(first_price)
         bars_per_day = 78
         self.data['T'] = (self.config.time_to_expiry_days/365 - self.data['bar_index']/(bars_per_day*252)).clip(1e-6)
-        bsm_res = bsm_vectorized(
-            self.data['price'], strike, self.data['T'], 
-            self.config.risk_free_rate, self.data['realized_vol'], self.config.position_sign
-        )
+        bsm_res = bsm_vectorized(self.data['price'], strike, self.data['T'], self.config.risk_free_rate, self.data['realized_vol'], self.config.position_sign)
         mult = self.config.num_straddles * self.config.contract_multiplier
         self.data['pos_delta'] = bsm_res['pos_delta'] * mult
         self.data['pos_gamma'] = bsm_res['pos_gamma'] * mult
@@ -172,9 +139,7 @@ class MarketMakerBacktest:
         initial_bsm = bsm_vectorized(pd.Series([first_price]), strike, pd.Series([self.config.time_to_expiry_days/365]), 0.05, pd.Series([initial_iv]))
         premium_total = initial_bsm['straddle_price_raw'].iloc[0] * mult
         
-        stock_pos = 0
-        cash_flow_stock = 0.0
-        cum_tc = 0.0
+        stock_pos = 0; cash_flow_stock = 0.0; cum_tc = 0.0
         stock_hist, pnl_hist = [], []
         threshold = self.config.delta_threshold * mult
         
@@ -185,411 +150,255 @@ class MarketMakerBacktest:
                 if abs(shares) >= self.config.min_shares_to_hedge:
                     price = row['price']
                     cost = abs(shares) * price * (self.config.total_tc_bps/10000)
-                    stock_pos += shares
-                    cash_flow_stock -= (shares * price) 
-                    cum_tc += cost
+                    stock_pos += shares; cash_flow_stock -= (shares * price); cum_tc += cost
                     self.trades.append(HedgeTrade(idx, "BUY" if shares>0 else "SELL", abs(shares), price, cost))
             stock_hist.append(stock_pos)
             current_stock_val = stock_pos * row['price']
             hedge_pnl = cash_flow_stock + current_stock_val
-            if self.config.position_type == PositionType.LONG:
-                 opt_pnl = row['liability'] - premium_total
-                 total_pnl = opt_pnl + hedge_pnl - cum_tc
-            else:
-                 opt_pnl = premium_total - row['liability']
-                 total_pnl = opt_pnl + hedge_pnl - cum_tc
-            pnl_hist.append(total_pnl)
+            opt_pnl = row['liability'] - premium_total if self.config.position_type == PositionType.LONG else premium_total - row['liability']
+            pnl_hist.append(opt_pnl + hedge_pnl - cum_tc)
         
-        self.data['stock_pos'] = stock_hist
-        self.data['total_pnl'] = pnl_hist
-        self.data['cum_tc'] = cum_tc
+        self.data['stock_pos'] = stock_hist; self.data['total_pnl'] = pnl_hist; self.data['cum_tc'] = cum_tc
         self.data['opt_pnl'] = [premium_total - l if self.config.position_type == PositionType.SHORT else l - premium_total for l in self.data['liability']]
         return self.data, self.trades, premium_total
 
-# --- PDF GENERATOR ---
+# --- PDF GENERATOR (Simplified) ---
 class PDFReport(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 15)
-        self.cell(0, 10, "Don's Quantitative Terminal | Analysis Report", 0, 1, 'C')
-        self.ln(5)
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+    def header(self): self.set_font('Arial', 'B', 15); self.cell(0, 10, "The Little Quant | Analysis Report", 0, 1, 'C'); self.ln(5)
+    def footer(self): self.set_y(-15); self.set_font('Arial', 'I', 8); self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def create_pdf(ticker, strategy_name, final_metrics, trades_df, figures):
-    pdf = PDFReport()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, f"Ticker: {ticker} | Strategi: {strategy_name}", 0, 1)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 10, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0, 1)
-    pdf.ln(5)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(0, 10, "Executive Summary:", 0, 1, 'L', fill=True)
-    pdf.cell(95, 10, f"Total Net P&L: {final_metrics['pnl_str']}", 1)
-    pdf.cell(95, 10, f"Option Income: {final_metrics['opt_str']}", 1, 1)
-    pdf.cell(95, 10, f"Scalping P&L:  {final_metrics['hed_str']}", 1)
-    pdf.cell(95, 10, f"Total Trades:  {final_metrics['trades_count']}", 1, 1)
-    pdf.ln(10)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Visualisasi Kinerja & Risiko", 0, 1)
-    for i, fig in enumerate(figures):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-            fig.savefig(tmpfile.name, bbox_inches='tight', dpi=100)
-            pdf.image(tmpfile.name, x=10, w=190)
-            pdf.ln(5)
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Log Transaksi (20 Terakhir)", 0, 1)
-    pdf.set_font("Arial", "", 8)
-    pdf.cell(40, 8, "Timestamp", 1)
-    pdf.cell(20, 8, "Action", 1)
-    pdf.cell(30, 8, "Price", 1)
-    pdf.cell(30, 8, "Shares", 1)
-    pdf.cell(30, 8, "Cost", 1, 1)
-    if not trades_df.empty:
-        for idx, row in trades_df.tail(20).iterrows():
-            pdf.cell(40, 8, str(row['timestamp']), 1)
-            pdf.cell(20, 8, row['action'], 1)
-            pdf.cell(30, 8, str(row['price']), 1)
-            pdf.cell(30, 8, str(row['shares']), 1)
-            pdf.cell(30, 8, str(row['transaction_cost']), 1, 1)
-    else:
-        pdf.cell(0, 8, "Tidak ada transaksi hedging tereksekusi.", 1, 1)
+    pdf = PDFReport(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("Arial", "B", 12); pdf.cell(0, 10, f"Ticker: {ticker} | Strategi: {strategy_name}", 0, 1)
+    pdf.set_font("Arial", "", 10); pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d')}", 0, 1); pdf.ln(5)
+    pdf.set_fill_color(240, 240, 240); pdf.cell(0, 10, "Summary:", 0, 1, 'L', fill=True)
+    pdf.cell(95, 10, f"Net P&L: {final_metrics['pnl_str']}", 1); pdf.cell(95, 10, f"Trades: {final_metrics['trades_count']}", 1, 1); pdf.ln(10)
+    pdf.cell(0, 10, "Visuals:", 0, 1)
+    for fig in figures:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            fig.savefig(tmp.name, bbox_inches='tight', dpi=100); pdf.image(tmp.name, x=10, w=190); pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
 # ==========================================
-# 4. SMART WHALE RADAR (PATCHED & ROBUST VERSION)
+# 3. MESIN 2: SMART WHALE RADAR
 # ==========================================
 def whale_radar_scanner(tickers):
-    """
-    Memindai daftar saham untuk mencari anomali Volume & Volatilitas
-    Versi Perbaikan: Anti-Crash, Handle NaN, dan Debugging.
-    """
     radar_data = []
-    
-    # UI Feedback
-    status_text = st.empty()
-    status_text.info("📡 Menghubungkan ke satelit data... Mohon tunggu.")
-    progress_bar = st.progress(0)
-    
-    # Bersihkan Ticker (Hapus spasi/duplikat/kosong)
+    status_text = st.empty(); status_text.info("📡 Scanning Whale Activity..."); prog = st.progress(0)
     clean_tickers = list(set([t.strip().upper() for t in tickers if t.strip() != ""]))
-    total_tickers = len(clean_tickers)
     
-    if total_tickers == 0:
-        status_text.error("Daftar ticker kosong!")
-        return pd.DataFrame()
-
     for i, ticker in enumerate(clean_tickers):
         try:
-            # Update status
-            status_text.markdown(f"Memindai: **{ticker}** ({i+1}/{total_tickers})")
-            
-            # 1. AMBIL DATA (Gunakan try-except khusus download)
-            try:
-                # auto_adjust=True membantu membersihkan data split/dividen
-                df = yf.download(ticker, period="3mo", progress=False, auto_adjust=True)
-            except Exception as e:
-                print(f"Gagal download {ticker}: {e}")
-                continue
-
-            # Handle MultiIndex (Masalah umum yfinance terbaru)
-            if isinstance(df.columns, pd.MultiIndex):
-                try:
-                    df.columns = df.columns.get_level_values(0)
-                except:
-                    pass # Kadang sudah flat
-            
-            # Cek kelayakan data
-            if df.empty or len(df) < 20: 
-                continue
-            
-            # Hapus baris yang mengandung NaN (Penting!)
+            df = yf.download(ticker, period="3mo", progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            if df.empty or len(df) < 20: continue
             df = df.dropna()
-
-            # 2. DATA PERSIAPAN (Ambil data terakhir)
-            last_close = float(df['Close'].iloc[-1])
-            last_open = float(df['Open'].iloc[-1])
-            last_vol = float(df['Volume'].iloc[-1])
             
-            # Jika volume 0 (Suspend/Libur), skip
-            if last_vol == 0:
-                continue
+            last_close = float(df['Close'].iloc[-1]); last_open = float(df['Open'].iloc[-1]); last_vol = float(df['Volume'].iloc[-1])
+            if last_vol == 0: continue
             
-            # 3. STATISTIK VOLUME (Z-SCORE)
-            # Hitung statistik dari 20 hari SEBELUM hari ini (agar hari ini tidak bias ke rata-rata)
-            history = df.iloc[:-1] # Data historis tanpa hari ini
-            if len(history) < 20:
-                vol_mean = df['Volume'].rolling(20).mean().iloc[-1]
-                vol_std = df['Volume'].rolling(20).std().iloc[-1]
-            else:
-                vol_mean = history['Volume'].tail(20).mean()
-                vol_std = history['Volume'].tail(20).std()
-            
-            # Z-Score Calculation (Safe Division)
-            if vol_std > 0:
-                vol_z_score = (last_vol - vol_mean) / vol_std
-            else:
-                vol_z_score = 0
-                
-            # RVOL
+            history = df.iloc[:-1]
+            vol_mean = history['Volume'].tail(20).mean(); vol_std = history['Volume'].tail(20).std()
+            vol_z = (last_vol - vol_mean) / vol_std if vol_std > 0 else 0
             rvol = last_vol / vol_mean if vol_mean > 0 else 0
+            body_pct = abs(last_close - last_open) / last_open if last_open > 0 else 0
             
-            # 4. PRICE ACTION (Body Candle %)
-            if last_open > 0:
-                body_size_pct = abs(last_close - last_open) / last_open
-            else:
-                body_size_pct = 0
-            
-            # 5. LOGIKA DETEKSI (Lebih Sensitif)
-            status = "Normal"
-            score = 0
-            
-            # SKENARIO A: ABSORPTION (Vol Tinggi, Harga Diam)
-            if vol_z_score > 2.0 and body_size_pct < 0.005: # Threshold diturunkan sedikit (2.0)
-                status = "🛡️ ABSORPTION (Tembok)"
-                score = 3
-            # SKENARIO B: MARK-UP
-            elif vol_z_score > 2.0 and (last_close > last_open):
-                status = "🚀 MARK-UP (Akumulasi)"
-                score = 2
-            # SKENARIO C: DISTRIBUTION
-            elif vol_z_score > 2.0 and (last_close < last_open):
-                status = "🔻 DISTRIBUTION (Guyur)"
-                score = 2
-            # SKENARIO D: HIGH ACTIVITY (Minimal alert)
-            elif vol_z_score > 1.2:
-                status = "👀 High Volume"
-                score = 1
+            status = "Normal"; score = 0
+            if vol_z > 2.0 and body_pct < 0.005: status = "🛡️ ABSORPTION"; score = 3
+            elif vol_z > 2.0 and last_close > last_open: status = "🚀 MARK-UP"; score = 2
+            elif vol_z > 2.0 and last_close < last_open: status = "🔻 DISTRIBUTION"; score = 2
+            elif vol_z > 1.2: status = "👀 High Vol"; score = 1
             
             if score > 0:
-                radar_data.append({
-                    "Ticker": ticker,
-                    "Price": last_close,
-                    "Vol Z-Score": vol_z_score,
-                    "RVOL": rvol,
-                    "Candle": f"{body_size_pct*100:.1f}%", # Disederhanakan namanya
-                    "Status": status,
-                    "_score": score
-                })
+                radar_data.append({"Ticker": ticker, "Price": last_close, "Z-Score": vol_z, "RVOL": rvol, "Status": status, "_score": score})
+        except: continue
+        prog.progress((i+1)/len(clean_tickers))
+        
+    status_text.empty(); prog.empty()
+    if not radar_data: return pd.DataFrame()
+    return pd.DataFrame(radar_data).sort_values(by=["_score", "Z-Score"], ascending=False).drop(columns=["_score"])
+
+# ==========================================
+# 4. MESIN 3: SIGNAL GENERATOR (BARU!)
+# ==========================================
+def generate_signals(tickers):
+    """
+    Menganalisis indikator teknikal untuk memberikan rekomendasi BELI/JUAL
+    berdasarkan logika Quant (Mean Reversion & Momentum).
+    """
+    signals = []
+    status_text = st.empty(); status_text.info("🎯 Mengkalkulasi Probabilitas..."); prog = st.progress(0)
+    clean_tickers = list(set([t.strip().upper() for t in tickers if t.strip() != ""]))
+    
+    for i, ticker in enumerate(clean_tickers):
+        try:
+            # Ambil data lebih panjang untuk indikator (6 bulan)
+            df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            if len(df) < 50: continue
             
-        except Exception as e:
-            # Jika error pada satu saham, jangan hentikan loop, lanjut ke saham berikutnya
-            print(f"Error processing {ticker}: {e}")
-            continue
+            # --- Technical Indicators ---
+            close = df['Close']
+            
+            # RSI (14)
+            delta = close.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            curr_rsi = rsi.iloc[-1]
+            
+            # Bollinger Bands (20, 2)
+            sma20 = close.rolling(window=20).mean()
+            std20 = close.rolling(window=20).std()
+            upper_bb = sma20 + (2 * std20)
+            lower_bb = sma20 - (2 * std20)
+            
+            curr_price = close.iloc[-1]
+            prev_price = close.iloc[-2]
+            
+            # Moving Average Trend
+            sma50 = close.rolling(window=50).mean().iloc[-1]
+            trend = "BULL" if curr_price > sma50 else "BEAR"
+            
+            # --- QUANT LOGIC (THE BRAIN) ---
+            action = "WAIT"
+            reason = "No Setup"
+            confidence = "Low"
+            
+            # STRATEGY 1: MEAN REVERSION (Buy The Dip)
+            # Syarat: Harga tembus BB Bawah + RSI Oversold (<30)
+            if curr_price < lower_bb.iloc[-1] and curr_rsi < 35:
+                action = "BUY (Reversal)"
+                reason = f"Oversold (RSI {curr_rsi:.0f}) + Tembus BB Bawah"
+                confidence = "High"
+            
+            # STRATEGY 2: MOMENTUM BREAKOUT (Follow The Whale)
+            # Syarat: Harga tembus BB Atas + Tren Bullish
+            elif curr_price > upper_bb.iloc[-1] and trend == "BULL":
+                action = "BUY (Breakout)"
+                reason = "Momentum kuat tembus BB Atas"
+                confidence = "Medium"
+                
+            # STRATEGY 3: RSI DIVERGENCE (Simple Bearish)
+            elif curr_rsi > 75:
+                action = "SELL/TP"
+                reason = f"Overbought (RSI {curr_rsi:.0f}) - Rawan Koreksi"
+                confidence = "High"
+            
+            # STRATEGY 4: DEAD CAT BOUNCE (Short)
+            elif trend == "BEAR" and curr_rsi > 60:
+                action = "SHORT"
+                reason = "Pantulan di Tren Turun (Bearish)"
+                confidence = "Medium"
+
+            # Filter: Hanya tampilkan yang ada sinyal
+            if action != "WAIT":
+                signals.append({
+                    "Ticker": ticker,
+                    "Price": curr_price,
+                    "Action": action,
+                    "Reason": reason,
+                    "Trend": trend,
+                    "RSI": f"{curr_rsi:.1f}"
+                })
+                
+        except: continue
+        prog.progress((i+1)/len(clean_tickers))
         
-        # Update progress bar
-        progress_bar.progress((i + 1) / total_tickers)
-    
-    # Bersihkan UI
-    status_text.empty()
-    progress_bar.empty()
-    
-    if not radar_data:
-        return pd.DataFrame()
-        
-    # Sortir dan Return
-    result_df = pd.DataFrame(radar_data)
-    return result_df.sort_values(by=["_score", "Vol Z-Score"], ascending=False).drop(columns=["_score"])
+    status_text.empty(); prog.empty()
+    if not signals: return pd.DataFrame()
+    return pd.DataFrame(signals).sort_values(by=["Action"])
 
 # ==========================================
-# 5. DASHBOARD UI (MAIN APP)
+# 5. UI UTAMA (DASHBOARD)
 # ==========================================
-
 with st.sidebar:
     st.header("🎛️ Control Panel")
-    client_mode = st.radio("Mode Klien:", ["Retail Trader (Long)", "Market Maker (Short)"])
+    client_mode = st.radio("Mode:", ["Retail (Long)", "Market Maker (Short)"])
     st.divider()
-    col_curr1, col_curr2 = st.columns(2)
-    with col_curr1:
-        currency_code = st.selectbox("Mata Uang:", ["USD", "IDR"])
-    with col_curr2:
-        curr_sym = "$" if currency_code == "USD" else "Rp"
-        st.write(f"Simbol: **{curr_sym}**")
-    ticker_default = "NVDA" if currency_code == "USD" else "BBCA.JK"
-    ticker = st.text_input("Ticker Saham:", ticker_default)
-    period = st.selectbox("Durasi Data:", ["5d", "1mo", "3mo"])
-    st.divider()
-    delta_thresh = st.slider("Delta Threshold", 0.05, 0.50, 0.10, 0.05)
-    contracts = st.number_input("Jumlah Lot", 1, 100, 10)
-    iv_premium = st.slider("Vol Premium Edge (%)", 0.0, 0.20, 0.05, 0.01) if "Market Maker" in client_mode else 0.0
+    currency = st.selectbox("Mata Uang:", ["USD", "IDR"])
+    sym = "$" if currency == "USD" else "Rp"
+    ticker_in = st.text_input("Ticker Audit:", "NVDA" if currency=="USD" else "BBCA.JK")
+    period = st.selectbox("Durasi:", ["5d", "1mo", "3mo"])
+    st.caption("Risk Param")
+    d_thresh = st.slider("Delta Threshold", 0.05, 0.50, 0.10, 0.05)
+    lot = st.number_input("Lot", 1, 100, 10)
 
-# --- TOMBOL AUDIT UTAMA ---
-if st.button("JALANKAN AUDIT", type="primary", use_container_width=True):
-    with st.spinner("Mengunduh data pasar & kalkulasi Greeks..."):
-        pos_type = PositionType.SHORT if "Market Maker" in client_mode else PositionType.LONG
-        config = MarketMakerConfig(ticker=ticker, position_type=pos_type, delta_threshold=delta_thresh, num_straddles=contracts, implied_vol_premium=iv_premium, lookback_days=5 if period=="5d" else 60)
-        loader = DataIngestion(config)
-        raw_df = loader.fetch_data(ticker, period, "5m")
+# --- TAB NAVIGASI ---
+tab_audit, tab_radar, tab_signal = st.tabs(["📊 Audit Strategi", "🐘 Whale Radar", "🎯 Signal Generator"])
+
+# 1. TAB AUDIT (Existing)
+with tab_audit:
+    if st.button("JALANKAN AUDIT", type="primary"):
+        with st.spinner("Processing..."):
+            pos = PositionType.SHORT if "Short" in client_mode else PositionType.LONG
+            cfg = MarketMakerConfig(ticker=ticker_in, position_type=pos, delta_threshold=d_thresh, num_straddles=lot, lookback_days=5 if period=="5d" else 60)
+            ldr = DataIngestion(cfg); raw = ldr.fetch_data(ticker_in, period, "5m")
+            if not raw.empty:
+                df = ldr.process(raw); eng = MarketMakerBacktest(cfg, df)
+                res, trd, prem = eng.run()
+                st.session_state.analyzed=True; st.session_state.res_df=res; st.session_state.trades=trd
+                st.session_state.pos=pos; st.session_state.tick=ticker_in
+                
+                # Metrics for PDF
+                met = {"pnl_str": f"{sym} {res['total_pnl'].iloc[-1]:,.0f}", "opt_str": f"{sym} {res['opt_pnl'].iloc[-1]:,.0f}", 
+                       "hed_str": f"{sym} {(res['total_pnl'].iloc[-1]-res['opt_pnl'].iloc[-1]):,.0f}", "trades_count": str(len(trd))}
+                # Figs
+                figs=[]; f1,ax=plt.subplots(figsize=(10,4)); ax.plot(res.index, res['total_pnl']); ax.set_title("P&L"); figs.append(f1)
+                f2,(axa,axb)=plt.subplots(2,1,figsize=(10,8)); axa.plot(res['pos_delta']+res['stock_pos']); axb.plot(res['pos_gamma']); figs.append(f2)
+                st.session_state.pdf_bytes = create_pdf(ticker_in, pos.value, met, pd.DataFrame([vars(t) for t in trd]) if trd else pd.DataFrame(), figs)
+
+    if st.session_state.analyzed:
+        fin = st.session_state.res_df.iloc[-1]
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Net P&L", f"{sym} {fin['total_pnl']:,.0f}", delta_color="normal")
+        c2.metric("Option Income", f"{sym} {fin['opt_pnl']:,.0f}")
+        c3.metric("Trades", len(st.session_state.trades))
+        st.line_chart(st.session_state.res_df['total_pnl'])
+        if st.session_state.pdf_bytes: st.download_button("Download PDF", st.session_state.pdf_bytes, "report.pdf", "application/pdf")
+
+# 2. TAB WHALE RADAR
+with tab_radar:
+    col_rad1, col_rad2 = st.columns([3,1])
+    def_tick = "BBCA.JK, BBRI.JK, TLKM.JK, BUMI.JK, GOTO.JK, MINA.JK, INET.JK, ANTM.JK"
+    usr_tick = col_rad1.text_area("Watchlist Radar:", def_tick, height=70)
+    if col_rad2.button("SCAN GAJAH"):
+        st.session_state.radar_results = whale_radar_scanner(usr_tick.split(","))
+    
+    if not st.session_state.radar_results.empty:
+        st.dataframe(st.session_state.radar_results.style.format({"Price":"{:,.0f}", "Z-Score":"{:.2f}", "RVOL":"{:.1f}x"}), use_container_width=True)
+
+# 3. TAB SIGNAL GENERATOR (NEW)
+with tab_signal:
+    st.subheader("Mesin Pencari Sinyal (The Alpha Scanner)")
+    st.caption("Menganalisis RSI, Bollinger Bands, dan Tren untuk entry point presisi.")
+    
+    col_sig1, col_sig2 = st.columns([3,1])
+    sig_tickers = col_sig1.text_area("Watchlist Sinyal (Saham/Forex/Crypto):", 
+                                     "BBCA.JK, BBRI.JK, TLKM.JK, ADRO.JK, UNTR.JK, BTC-USD, EURUSD=X", height=70)
+    
+    if col_sig2.button("CARI PELUANG", type="primary"):
+        st.session_state.signal_results = generate_signals(sig_tickers.split(","))
         
-        if not raw_df.empty:
-            df = loader.process(raw_df)
-            engine = MarketMakerBacktest(config, df)
-            res_df, trades, premium = engine.run()
-            
-            # SIMPAN HASIL KE SESSION STATE
-            st.session_state.analyzed = True
-            st.session_state.res_df = res_df
-            st.session_state.trades = trades
-            st.session_state.premium = premium
-            st.session_state.pos_type = pos_type
-            st.session_state.ticker = ticker
-            st.session_state.ticker_file_name = f"Quant_Report_{ticker}_{datetime.now().strftime('%Y%m%d')}.pdf"
-            
-            # GENERATE PDF
-            metrics_data = {
-                "pnl_str": f"{curr_sym} {res_df['total_pnl'].iloc[-1]:,.2f}",
-                "opt_str": f"{curr_sym} {res_df['opt_pnl'].iloc[-1]:,.2f}",
-                "hed_str": f"{curr_sym} {(res_df['total_pnl'].iloc[-1] - res_df['opt_pnl'].iloc[-1]):,.2f}",
-                "trades_count": str(len(trades))
-            }
-            
-            pdf_figs = []
-            fig1, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(res_df.index, res_df['total_pnl'], label='Total P&L', color='#00FF00' if res_df['total_pnl'].iloc[-1]>0 else '#FF3333', linewidth=2)
-            ax.axhline(0, color='black', linestyle='--', linewidth=0.5)
-            ax.set_ylabel(f"P&L ({currency_code})")
-            ax.set_title("Cumulative P&L")
-            pdf_figs.append(fig1)
-            
-            fig2, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-            ax_a.plot(res_df.index, res_df['pos_delta'] + res_df['stock_pos'], color='#F39C12')
-            ax_a.set_title("Net Delta Exposure")
-            ax_b.plot(res_df.index, res_df['pos_gamma'], color='#9B59B6')
-            ax_b.set_title("Gamma Risk")
-            pdf_figs.append(fig2)
-            
-            st.session_state.pdf_bytes = create_pdf(
-                ticker=ticker,
-                strategy_name=f"{pos_type.value} STRADDLE",
-                final_metrics=metrics_data,
-                trades_df=pd.DataFrame([vars(t) for t in trades]) if trades else pd.DataFrame(),
-                figures=pdf_figs
-            )
-        else:
-            st.error(f"Gagal mengambil data untuk {ticker}.")
-
-# --- RENDER HASIL AUDIT ---
-if st.session_state.analyzed:
-    res_df = st.session_state.res_df
-    trades = st.session_state.trades
-    final = res_df.iloc[-1]
-    
-    st.title(f"♟️ Laporan Analisis: {st.session_state.ticker}")
-    st.markdown(f"**Strategi:** `{st.session_state.pos_type.value} STRADDLE`")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    pnl_color = "normal" if final['total_pnl'] > 0 else "inverse"
-    
-    c1.metric("Total Net P&L", f"{curr_sym} {final['total_pnl']:,.2f}", delta=f"{final['total_pnl']:,.2f}", delta_color=pnl_color)
-    c2.metric("P&L Opsi (Income)", f"{curr_sym} {final['opt_pnl']:,.2f}")
-    c3.metric("P&L Hedging (Cost)", f"{curr_sym} {(final['total_pnl'] - final['opt_pnl']):,.2f}")
-    c4.metric("Jumlah Trade", len(trades))
-    
-    tab1, tab2, tab3 = st.tabs(["📈 Kinerja Keuangan", "⚠️ Audit Risiko", "📝 Log Transaksi"])
-    
-    with tab1:
-        st.subheader("Kurva Ekuitas")
-        fig1, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(res_df.index, res_df['total_pnl'], label='Total P&L', color='#00FF00' if final['total_pnl']>0 else '#FF3333', linewidth=2)
-        ax.fill_between(res_df.index, 0, res_df['total_pnl'], alpha=0.1, color='gray')
-        ax.axhline(0, color='white', linestyle='--', linewidth=0.5)
-        ax.set_ylabel(f"P&L ({currency_code})")
+    if not st.session_state.signal_results.empty:
+        res = st.session_state.signal_results
         
-        # Dark Mode Styling
-        ax.set_facecolor('#0e1117')
-        fig1.patch.set_facecolor('#0e1117')
-        ax.tick_params(colors='white')
-        ax.xaxis.label.set_color('white')
-        ax.yaxis.label.set_color('white')
-        ax.spines['bottom'].set_color('white')
-        ax.spines['top'].set_color('white')
-        ax.spines['right'].set_color('white')
-        ax.spines['left'].set_color('white')
-        st.pyplot(fig1)
-
-    with tab2:
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown("#### Eksposur Net Delta")
-            st.line_chart(res_df['pos_delta'] + res_df['stock_pos'])
-        with col_right:
-            st.markdown("#### Risiko Gamma")
-            st.line_chart(res_df['pos_gamma'])
-
-    with tab3:
-        if trades:
-            trade_df = pd.DataFrame([vars(t) for t in trades])
-            display_df = trade_df.copy()
-            display_df['price'] = display_df['price'].apply(lambda x: f"{curr_sym} {x:,.2f}")
-            display_df['transaction_cost'] = display_df['transaction_cost'].apply(lambda x: f"{curr_sym} {x:,.2f}")
-            st.dataframe(display_df, use_container_width=True)
-        else:
-            st.write("Pasar tenang. Tidak ada hedging yang tereksekusi.")
-
-    st.divider()
-    if st.session_state.pdf_bytes:
-        st.download_button(
-            label="📄 Download PDF Lengkap",
-            data=st.session_state.pdf_bytes,
-            file_name=st.session_state.ticker_file_name,
-            mime="application/pdf",
-            type="primary"
-        )
-
-# ==========================================
-# 6. WHALE RADAR UI (BAGIAN BAWAH) - REVISI
-# ==========================================
-st.divider()
-st.header("🐘 Smart Whale Radar (Live Scanner)")
-st.caption("Mendeteksi Anomali Volume & Absorption (Jejak Gajah)")
-
-col_radar1, col_radar2 = st.columns([3, 1])
-with col_radar1:
-    # Default ticker diperbanyak untuk tes
-    default_tickers = "BBCA.JK, BBRI.JK, BMRI.JK, TLKM.JK, ASII.JK, GOTO.JK, BUMI.JK, ANTM.JK, ADRO.JK, UNTR.JK, MINA.JK"
-    user_tickers = st.text_area("Watchlist Saham (Pisahkan dengan koma):", default_tickers, height=70)
-
-with col_radar2:
-    st.write("")
-    st.write("")
-    scan_button = st.button("SCAN SEKARANG", use_container_width=True, type="primary")
-
-if scan_button:
-    # Reset hasil lama
-    st.session_state.radar_results = pd.DataFrame()
-    
-    # Proses Input
-    ticker_list = user_tickers.split(",")
-    
-    # Jalankan Scanner
-    with st.spinner("Sedang membedah mikrostruktur pasar..."):
-        results = whale_radar_scanner(ticker_list)
-        st.session_state.radar_results = results
-
-# Tampilkan Hasil
-if not st.session_state.radar_results.empty:
-    st.success(f"Ditemukan {len(st.session_state.radar_results)} saham dengan aktivitas institusi!")
-    
-    def highlight_row(row):
-        # Styling baris berdasarkan Status
-        if "ABSORPTION" in row['Status']:
-            return ['background-color: #4a148c; color: white'] * len(row) # Ungu Gelap
-        elif "MARK-UP" in row['Status']:
-            return ['background-color: #1b5e20; color: white'] * len(row) # Hijau Tua
-        elif "DISTRIBUTION" in row['Status']:
-            return ['background-color: #b71c1c; color: white'] * len(row) # Merah Tua
-        else:
-            return [''] * len(row)
-
-    st.dataframe(
-        st.session_state.radar_results.style.apply(highlight_row, axis=1)
-                     .format({"Price": "{:,.0f}", "Vol Z-Score": "{:.2f}", "RVOL": "{:.1f}x"}),
-        use_container_width=True
-    )
-    
-elif scan_button and st.session_state.radar_results.empty:
-    st.warning("Radar menyala, tapi tidak ada Gajah yang lewat (Pasar tenang/Ticker salah). Coba turunkan kriteria atau tambah watchlist.")
+        # Pisahkan Bullish dan Bearish
+        bull = res[res['Action'].str.contains("BUY")]
+        bear = res[res['Action'].str.contains("SELL") | res['Action'].str.contains("SHORT")]
+        
+        c_bull, c_bear = st.columns(2)
+        with c_bull:
+            st.success(f"🟢 Peluang Beli ({len(bull)})")
+            if not bull.empty:
+                st.dataframe(bull[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
+            else: st.write("Belum ada setup Beli.")
+            
+        with c_bear:
+            st.error(f"🔴 Peluang Jual ({len(bear)})")
+            if not bear.empty:
+                st.dataframe(bear[['Ticker', 'Price', 'Action', 'Reason']].style.format({"Price":"{:,.2f}"}), use_container_width=True)
+            else: st.write("Belum ada setup Jual.")
+            
+        st.info("**Logika Quant:**\n1. **BUY (Reversal):** Harga tembus BB Bawah + RSI < 35 (Diskon).\n2. **BUY (Breakout):** Harga tembus BB Atas + Tren Naik (Follow Gajah).")
