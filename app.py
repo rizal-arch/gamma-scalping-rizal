@@ -1283,7 +1283,7 @@ with tab_quant_lab:
                     st.dataframe(betas.style.format({"Beta": "{:.2f}"}), use_container_width=True)
 
 # ==========================================
-# TAB 5: PORTFOLIO ANALYTICS (NEW)
+# TAB 5: PORTFOLIO ANALYTICS (UPDATED - PIE CHARTS)
 # ==========================================
 with tab_portfolio:
     st.markdown('<div class="quant-header"><h2>📈 Portfolio Optimization Engine</h2><p>Mean-Variance, Risk Parity & Efficient Frontier</p></div>', unsafe_allow_html=True)
@@ -1329,54 +1329,181 @@ with tab_portfolio:
         weights = st.session_state.portfolio_weights
         tickers = weights['tickers']
         
+        # Helper function to create pie chart
+        def create_pie_chart(weights_array, tickers, title, color_scheme):
+            """Create a professional pie chart with percentage labels"""
+            fig, ax = plt.subplots(figsize=(8, 8))
+            
+            # Filter out very small weights for cleaner visualization
+            threshold = 0.01  # 1% minimum to show
+            filtered_weights = []
+            filtered_labels = []
+            filtered_colors = []
+            other_weight = 0
+            
+            # Color palettes
+            color_palettes = {
+                'green': ['#00ff88', '#00cc6a', '#00994d', '#006633', '#004d26', '#00331a', '#001a0d', '#00ff99', '#33ffaa', '#66ffbb'],
+                'red': ['#ff6b6b', '#ff5252', '#ff3838', '#ff1f1f', '#e60000', '#cc0000', '#b30000', '#990000', '#800000', '#660000'],
+                'cyan': ['#4ecdc4', '#45b7aa', '#3ca192', '#338b7a', '#2a7563', '#215f4c', '#184936', '#0f3320', '#4dd9cf', '#66e0d8']
+            }
+            
+            colors = color_palettes.get(color_scheme, color_palettes['green'])
+            
+            for i, (w, t) in enumerate(zip(weights_array, tickers)):
+                if w >= threshold:
+                    filtered_weights.append(w)
+                    filtered_labels.append(t)
+                    filtered_colors.append(colors[i % len(colors)])
+                else:
+                    other_weight += w
+            
+            # Add "Others" category if there are small weights
+            if other_weight > 0.001:
+                filtered_weights.append(other_weight)
+                filtered_labels.append('Others')
+                filtered_colors.append('#888888')
+            
+            # Create pie chart
+            wedges, texts, autotexts = ax.pie(
+                filtered_weights, 
+                labels=filtered_labels,
+                autopct=lambda pct: f'{pct:.1f}%' if pct > 3 else '',
+                colors=filtered_colors,
+                explode=[0.02] * len(filtered_weights),  # Slight separation
+                shadow=True,
+                startangle=90,
+                textprops={'fontsize': 10, 'color': 'white'},
+                wedgeprops={'edgecolor': '#0e1117', 'linewidth': 2}
+            )
+            
+            # Style the percentage text
+            for autotext in autotexts:
+                autotext.set_color('white')
+                autotext.set_fontweight('bold')
+                autotext.set_fontsize(9)
+            
+            # Style the labels
+            for text in texts:
+                text.set_color('white')
+                text.set_fontsize(10)
+            
+            ax.set_title(title, color='white', fontsize=14, fontweight='bold', pad=20)
+            
+            # Dark background
+            fig.patch.set_facecolor('#0e1117')
+            ax.set_facecolor('#0e1117')
+            
+            # Add a legend with percentages
+            legend_labels = [f'{t}: {w*100:.1f}%' for t, w in zip(filtered_labels, filtered_weights)]
+            ax.legend(wedges, legend_labels, 
+                     title="Allocation",
+                     loc="center left",
+                     bbox_to_anchor=(1, 0, 0.5, 1),
+                     facecolor='#262730',
+                     labelcolor='white',
+                     title_fontsize=10,
+                     fontsize=9)
+            
+            plt.tight_layout()
+            return fig
+        
         # Display optimized portfolios
         col_p1, col_p2, col_p3 = st.columns(3)
         
         with col_p1:
             st.markdown("#### 🎯 Maximum Sharpe")
             ms = weights['max_sharpe']
-            st.metric("Sharpe Ratio", f"{ms['sharpe']:.3f}")
-            st.metric("Expected Return", f"{ms['return']*100:.2f}%")
+            
+            # Metrics
+            met_col1, met_col2 = st.columns(2)
+            met_col1.metric("Sharpe Ratio", f"{ms['sharpe']:.3f}")
+            met_col2.metric("Expected Return", f"{ms['return']*100:.2f}%")
             st.metric("Volatility", f"{ms['volatility']*100:.2f}%")
             
-            # Weights chart
-            fig_w1, ax_w1 = plt.subplots(figsize=(6, 4))
-            ax_w1.barh(tickers, ms['weights'], color='#00ff88')
-            ax_w1.set_facecolor('#0e1117')
-            fig_w1.patch.set_facecolor('#0e1117')
-            ax_w1.tick_params(colors='white')
-            ax_w1.set_xlabel('Weight', color='white')
-            st.pyplot(fig_w1)
+            # Pie Chart
+            fig_pie1 = create_pie_chart(ms['weights'], tickers, '🎯 Max Sharpe Allocation', 'green')
+            st.pyplot(fig_pie1)
+            plt.close(fig_pie1)
         
         with col_p2:
             st.markdown("#### 🛡️ Minimum Variance")
             mv = weights['min_var']
-            st.metric("Sharpe Ratio", f"{mv['sharpe']:.3f}")
-            st.metric("Expected Return", f"{mv['return']*100:.2f}%")
+            
+            # Metrics
+            met_col1, met_col2 = st.columns(2)
+            met_col1.metric("Sharpe Ratio", f"{mv['sharpe']:.3f}")
+            met_col2.metric("Expected Return", f"{mv['return']*100:.2f}%")
             st.metric("Volatility", f"{mv['volatility']*100:.2f}%")
             
-            fig_w2, ax_w2 = plt.subplots(figsize=(6, 4))
-            ax_w2.barh(tickers, mv['weights'], color='#ff6b6b')
-            ax_w2.set_facecolor('#0e1117')
-            fig_w2.patch.set_facecolor('#0e1117')
-            ax_w2.tick_params(colors='white')
-            ax_w2.set_xlabel('Weight', color='white')
-            st.pyplot(fig_w2)
+            # Pie Chart
+            fig_pie2 = create_pie_chart(mv['weights'], tickers, '🛡️ Min Variance Allocation', 'red')
+            st.pyplot(fig_pie2)
+            plt.close(fig_pie2)
         
         with col_p3:
             st.markdown("#### ⚖️ Risk Parity")
             rp = weights['risk_parity']
-            st.metric("Sharpe Ratio", f"{rp['sharpe']:.3f}")
-            st.metric("Expected Return", f"{rp['return']*100:.2f}%")
+            
+            # Metrics
+            met_col1, met_col2 = st.columns(2)
+            met_col1.metric("Sharpe Ratio", f"{rp['sharpe']:.3f}")
+            met_col2.metric("Expected Return", f"{rp['return']*100:.2f}%")
             st.metric("Volatility", f"{rp['volatility']*100:.2f}%")
             
-            fig_w3, ax_w3 = plt.subplots(figsize=(6, 4))
-            ax_w3.barh(tickers, rp['weights'], color='#4ecdc4')
-            ax_w3.set_facecolor('#0e1117')
-            fig_w3.patch.set_facecolor('#0e1117')
-            ax_w3.tick_params(colors='white')
-            ax_w3.set_xlabel('Weight', color='white')
-            st.pyplot(fig_w3)
+            # Pie Chart
+            fig_pie3 = create_pie_chart(rp['weights'], tickers, '⚖️ Risk Parity Allocation', 'cyan')
+            st.pyplot(fig_pie3)
+            plt.close(fig_pie3)
+        
+        # Comparison Table
+        st.divider()
+        st.markdown("### 📊 Portfolio Comparison")
+        
+        comparison_data = []
+        for opt_name, opt_data in [('Max Sharpe 🎯', ms), ('Min Variance 🛡️', mv), ('Risk Parity ⚖️', rp)]:
+            row = {'Strategy': opt_name}
+            for i, ticker in enumerate(tickers):
+                row[ticker] = f"{opt_data['weights'][i]*100:.1f}%"
+            row['Return'] = f"{opt_data['return']*100:.2f}%"
+            row['Vol'] = f"{opt_data['volatility']*100:.2f}%"
+            row['Sharpe'] = f"{opt_data['sharpe']:.3f}"
+            comparison_data.append(row)
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        
+        # Top Holdings Summary
+        st.markdown("### 🏆 Top 5 Holdings per Strategy")
+        
+        col_top1, col_top2, col_top3 = st.columns(3)
+        
+        def get_top_holdings(weights_array, tickers, n=5):
+            """Get top n holdings sorted by weight"""
+            paired = list(zip(tickers, weights_array))
+            paired.sort(key=lambda x: x[1], reverse=True)
+            return paired[:n]
+        
+        with col_top1:
+            st.markdown("**Max Sharpe**")
+            for ticker, weight in get_top_holdings(ms['weights'], tickers):
+                if weight > 0.01:
+                    bar_width = int(weight * 100)
+                    st.markdown(f"`{ticker}` {'█' * min(bar_width, 20)} **{weight*100:.1f}%**")
+        
+        with col_top2:
+            st.markdown("**Min Variance**")
+            for ticker, weight in get_top_holdings(mv['weights'], tickers):
+                if weight > 0.01:
+                    bar_width = int(weight * 100)
+                    st.markdown(f"`{ticker}` {'█' * min(bar_width, 20)} **{weight*100:.1f}%**")
+        
+        with col_top3:
+            st.markdown("**Risk Parity**")
+            for ticker, weight in get_top_holdings(rp['weights'], tickers):
+                if weight > 0.01:
+                    bar_width = int(weight * 100)
+                    st.markdown(f"`{ticker}` {'█' * min(bar_width, 20)} **{weight*100:.1f}%**")
         
         # Efficient Frontier Plot
         if st.session_state.efficient_frontier is not None:
@@ -1407,6 +1534,83 @@ with tab_portfolio:
             ax_ef.grid(True, alpha=0.3)
             
             st.pyplot(fig_ef)
+            plt.close(fig_ef)
+        
+        # Donut Chart Alternative (Combined View)
+        st.divider()
+        st.markdown("### 🍩 Combined Allocation View (Donut Charts)")
+        
+        def create_donut_chart(weights_array, tickers, title, inner_text):
+            """Create a donut chart with center text"""
+            fig, ax = plt.subplots(figsize=(6, 6))
+            
+            # Filter small weights
+            threshold = 0.02
+            filtered_weights = []
+            filtered_labels = []
+            other_weight = 0
+            
+            # Professional color palette
+            colors = plt.cm.Set3(np.linspace(0, 1, len(tickers)))
+            filtered_colors = []
+            
+            for i, (w, t) in enumerate(zip(weights_array, tickers)):
+                if w >= threshold:
+                    filtered_weights.append(w)
+                    filtered_labels.append(f'{t}\n{w*100:.1f}%')
+                    filtered_colors.append(colors[i])
+                else:
+                    other_weight += w
+            
+            if other_weight > 0.001:
+                filtered_weights.append(other_weight)
+                filtered_labels.append(f'Others\n{other_weight*100:.1f}%')
+                filtered_colors.append('#888888')
+            
+            # Create donut
+            wedges, texts = ax.pie(
+                filtered_weights,
+                colors=filtered_colors,
+                startangle=90,
+                wedgeprops={'width': 0.5, 'edgecolor': '#0e1117', 'linewidth': 2}
+            )
+            
+            # Add labels outside
+            for i, (wedge, label) in enumerate(zip(wedges, filtered_labels)):
+                angle = (wedge.theta2 + wedge.theta1) / 2
+                x = np.cos(np.radians(angle))
+                y = np.sin(np.radians(angle))
+                
+                ha = 'left' if x > 0 else 'right'
+                ax.annotate(label, xy=(x*0.75, y*0.75), ha='center', va='center',
+                           fontsize=8, color='white', fontweight='bold')
+            
+            # Center text
+            ax.text(0, 0, inner_text, ha='center', va='center', 
+                   fontsize=12, color='white', fontweight='bold')
+            
+            ax.set_title(title, color='white', fontsize=11, fontweight='bold')
+            fig.patch.set_facecolor('#0e1117')
+            ax.set_facecolor('#0e1117')
+            
+            return fig
+        
+        col_d1, col_d2, col_d3 = st.columns(3)
+        
+        with col_d1:
+            fig_d1 = create_donut_chart(ms['weights'], tickers, 'Max Sharpe', f"SR: {ms['sharpe']:.2f}")
+            st.pyplot(fig_d1)
+            plt.close(fig_d1)
+        
+        with col_d2:
+            fig_d2 = create_donut_chart(mv['weights'], tickers, 'Min Variance', f"Vol: {mv['volatility']*100:.1f}%")
+            st.pyplot(fig_d2)
+            plt.close(fig_d2)
+        
+        with col_d3:
+            fig_d3 = create_donut_chart(rp['weights'], tickers, 'Risk Parity', f"Ret: {rp['return']*100:.1f}%")
+            st.pyplot(fig_d3)
+            plt.close(fig_d3)
 
 # ==========================================
 # TAB 6: STRESS TESTING (NEW)
